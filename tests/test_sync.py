@@ -42,3 +42,30 @@ def test_parses_documented_response():
         "total_upload": 0, "total_download": 1, "total_conflict": 0, "total_no_op": 0, "total_delete": 0,
     })
     assert r.operations[0].action == "download"
+
+
+def test_full_sync_batches_rom_ids(layout, remote, monkeypatch):
+    """RomM rejects more than 500 rom_ids; each batch is its own session with its own saves."""
+    from romm_shelf import service
+    from romm_shelf.auth import Session
+
+    class Client:
+        def __init__(self):
+            self.payloads, self.completed = [], []
+
+        def negotiate(self, payload):
+            self.payloads.append(payload)
+            return NegotiateResponse(session_id=len(self.payloads), operations=[])
+
+        def complete_session(self, session_id, **kw):
+            self.completed.append(session_id)
+
+    monkeypatch.setattr(service, "NEGOTIATE_BATCH", 1)
+    client = Client()
+    session = Session(url="http://romm", token="t", device_id="dev")
+    service.sync_roms(session, client, layout, load_adapters(), None, plan_only=True, states=False, remote=remote)
+    batches = [p.rom_ids for p in client.payloads]
+    assert all(len(b) == 1 for b in batches) and len(batches) > 1
+    for p in client.payloads:
+        assert {s.rom_id for s in p.saves} <= set(p.rom_ids)
+    assert client.completed == list(range(1, len(batches) + 1))
