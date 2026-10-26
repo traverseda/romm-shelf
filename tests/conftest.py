@@ -24,7 +24,7 @@ def deck(tmp_path: Path) -> Path:
     cfg.parent.mkdir(parents=True)
     base = "/home/deck/Emulation/retrodeck"
     cfg.write_text(json.dumps({"paths": {
-        "roms_path": f"{base}/roms", "saves_path": f"{base}/saves",
+        "rd_home_path": base, "roms_path": f"{base}/roms", "saves_path": f"{base}/saves",
         "states_path": f"{base}/states", "bios_path": f"{base}/bios",
     }}))
     touch(rd / "roms/nes/Wizardry - The Knight of Diamonds.zip")
@@ -37,6 +37,10 @@ def deck(tmp_path: Path) -> Path:
     touch(rd / "saves/Mega Man Legends/Mega Man Legends.srm")
     touch(rd / "states/nes/from_below_2020_09_16_v_1_0_0.state.auto")
     touch(rd / "states/nes/from_below_2020_09_16_v_1_0_0.state3")
+    touch(rd / "ES-DE/scripts/.directory")
+    es = tmp_path / "home/deck/.var/app/net.retrodeck.retrodeck/config/ES-DE/settings/es_settings.xml"
+    touch(es, b'<?xml version="1.0"?>\n<bool name="CustomEventScripts" value="false" />\n'
+              b'<bool name="CustomEventScriptsBrowsing" value="false" />\n')
     return tmp_path
 
 
@@ -46,6 +50,8 @@ def settings(deck: Path) -> Settings:
         fs_root=deck,
         retrodeck_config=Path("/home/deck/.var/app/net.retrodeck.retrodeck/config/retrodeck/retrodeck.json"),
         credentials_path=deck / "credentials.json",
+        es_settings=Path("/home/deck/.var/app/net.retrodeck.retrodeck/config/ES-DE/settings/es_settings.xml"),
+        systemd_user_dir=Path("/home/deck/.config/systemd/user"),
     )
 
 

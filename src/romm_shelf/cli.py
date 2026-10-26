@@ -3,6 +3,7 @@
 import json
 import sys
 from collections import Counter
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -11,9 +12,10 @@ from loguru import logger
 from romm_shelf.adapters import load_adapters
 from romm_shelf.auth import device_login, load_session, save_credentials
 from romm_shelf.config import Settings
-from romm_shelf.execute import plan_saves, plan_states, run
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import match, scan_local
+from romm_shelf import hooks
+from romm_shelf.service import rom_for_path, sync_roms
 from romm_shelf.sync import inventory, negotiate_payload
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -85,15 +87,64 @@ def list_roms(
 
 
 @app.command()
-def serve(
-    port: Annotated[int, typer.Option(help="Port on 127.0.0.1")] = 8765,
-):
-    """Run the local daemon: the UI and its API, on 127.0.0.1 only."""
+def serve():
+    """Run the local daemon on 127.0.0.1: UI, ES-DE hook endpoints, sync before sleep."""
     import uvicorn
 
     from romm_shelf.server import create_app
 
-    uvicorn.run(create_app(), host="127.0.0.1", port=port, log_level="info")
+    uvicorn.run(create_app(), host="127.0.0.1", port=Settings().port, log_level="info")
+
+
+hooks_app = typer.Typer(no_args_is_help=True, help="ES-DE hooks and the daemon's systemd unit.")
+app.add_typer(hooks_app, name="hooks")
+
+
+def _default_exec_start() -> str:
+    return f"{Path(sys.argv[0]).resolve()} serve"
+
+
+@hooks_app.command("install")
+def hooks_install(
+    plan: Annotated[bool, typer.Option("--plan", help="Print the changes; make none")] = False,
+    exec_start: Annotated[str | None, typer.Option(help="Command systemd runs for the daemon")] = None,
+):
+    """Install the ES-DE game-start/game-end scripts and the daemon's user unit."""
+    changes = hooks.install_plan(Settings(), exec_start or _default_exec_start())
+    for c in changes:
+        typer.echo(c.describe())
+    if not plan:
+        hooks.apply(changes)
+        typer.echo("# installed")
+
+
+@hooks_app.command("remove")
+def hooks_remove(plan: Annotated[bool, typer.Option("--plan", help="Print the changes; make none")] = False):
+    """Undo `hooks install`. Only files romm-shelf wrote are removed."""
+    changes = hooks.remove_plan(Settings())
+    for c in changes:
+        typer.echo(c.describe())
+    if not plan:
+        hooks.apply(changes)
+        typer.echo("# removed")
+
+
+@app.command()
+def hook(
+    event: Annotated[str, typer.Argument(help="game-start or game-end")],
+    rom_path: Annotated[str, typer.Argument(help="ROM path as ES-DE passes it")],
+):
+    """Run what an ES-DE hook runs, directly (the scripts call the daemon instead)."""
+    settings, session, client, layout = _context()
+    m = match(scan_local(layout.roms), client.roms())
+    rom = rom_for_path(rom_path, layout, m.matched)
+    if rom is None:
+        typer.echo("# not a RomM ROM; nothing to sync")
+        return
+    result = sync_roms(session, client, layout, load_adapters(), [rom.id])
+    for step in result.steps:
+        typer.echo(step.describe())
+    typer.echo(f"# {event}: done {result.done}, failed {result.failed}")
 
 
 @app.command()
@@ -110,30 +161,24 @@ def sync(
         raise typer.BadParameter("name ROMs with --rom, or pass --all")
     settings, session, client, layout = _context()
     adapters = load_adapters()
-    m = match(scan_local(layout.roms), client.roms())
-    matched = [(l, r) for l, r in m.matched if all_roms or r.id in rom]
-    inv = inventory(matched, adapters, layout)
-    rom_ids = sorted({r.id for _, r in matched})
-    payload = negotiate_payload(inv, adapters, device_id=session.device_id, rom_ids=rom_ids)
-    payload.restore_unlisted = restore
-    typer.echo(f"# {len(inv.saves)} saves, {len(inv.states)} states on device for {len(rom_ids)} ROMs")
     if plan and offline:
+        m = match(scan_local(layout.roms), client.roms())
+        matched = [(l, r) for l, r in m.matched if all_roms or r.id in rom]
+        inv = inventory(matched, adapters, layout)
+        payload = negotiate_payload(inv, adapters, device_id=session.device_id,
+                                    rom_ids=sorted({r.id for _, r in matched}))
+        payload.restore_unlisted = restore
         typer.echo(json.dumps(payload.model_dump(mode="json", exclude_none=True), indent=2))
         return
 
-    response = client.negotiate(payload)
-    steps = plan_saves(response, inv, {r.id: l for l, r in matched}, {a.emulator: a for a in adapters}, layout)
-    if states:
-        server_states = {rid: client.states(rid) for rid in {r.id for r, _ in inv.states}}
-        steps += plan_states(inv, server_states, session.device_id)
-    for step in steps:
+    # A plan executes nothing; sync_roms closes the server's session with zero operations.
+    result = sync_roms(session, client, layout, adapters, None if all_roms else rom,
+                       plan_only=plan, restore=restore, states=states)
+    for step in result.steps:
         typer.echo(step.describe())
-    typer.echo("# " + (", ".join(f"{k}: {v}" for k, v in sorted(Counter(s.action for s in steps).items())) or "nothing to do"))
-    if plan:
-        # A plan executes nothing, so close the session the server opened with zero operations.
-        client.complete_session(response.session_id, completed=0, failed=0)
-        return
-    done, failed = run(steps, client, device_id=session.device_id, layout=layout, session_id=response.session_id)
-    typer.echo(f"# done: {done}, failed: {failed}")
-    if failed:
-        raise typer.Exit(1)
+    counts = Counter(s.action for s in result.steps)
+    typer.echo("# " + (", ".join(f"{k}: {v}" for k, v in sorted(counts.items())) or "nothing to do"))
+    if not plan:
+        typer.echo(f"# done: {result.done}, failed: {result.failed}")
+        if result.failed:
+            raise typer.Exit(1)

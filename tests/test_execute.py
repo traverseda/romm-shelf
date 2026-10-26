@@ -93,6 +93,20 @@ def test_states_push_when_missing_and_flag_newer_foreign(layout, remote):
     assert ("push-state", "from_below_2020_09_16_v_1_0_0.state.auto") in actions
 
 
+def test_states_pull_newest_when_none_local(layout, remote):
+    inv, locals_, adapters = _setup(layout, remote)
+    now = datetime.now(UTC)
+    server = {1006: [_state(1, [], now - timedelta(days=2), "Wizardry [2026-10-24].state.auto"),
+                     _state(2, [], now, "Wizardry [2026-10-26].state.auto")]}
+    roms = {r.id: r for r in remote}
+    steps = plan_states(inv, server, "me", missing={1006: locals_[1006]}, roms=roms,
+                        adapters=adapters, layout=layout)
+    [step] = [s for s in steps if s.action == "pull-state"]
+    assert (step.action, step.server_state.id) == ("pull-state", 2)
+    # Named after the ROM so RetroArch's savestate_auto_load finds it.
+    assert step.path == layout.states / "nes" / "Wizardry - The Knight of Diamonds.state.auto"
+
+
 def test_states_skip_when_our_copy_is_current(layout, remote):
     inv, _, _ = _setup(layout, remote)
     future = datetime.now(UTC) + timedelta(days=1)

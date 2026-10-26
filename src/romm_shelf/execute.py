@@ -77,10 +77,25 @@ def plan_saves(
     return steps
 
 
-def plan_states(inv: LocalInventory, server: dict[int, list[ServerState]], device_id: str) -> list[Step]:
-    """design.md § States: push our newer states; pull only when nothing is local; flag the rest."""
+def plan_states(
+    inv: LocalInventory, server: dict[int, list[ServerState]], device_id: str, *,
+    missing: dict[int, LocalRom] | None = None, roms: dict[int, Rom] | None = None,
+    adapters: dict[str, Adapter] | None = None, layout: RetroDeckLayout | None = None,
+) -> list[Step]:
+    """design.md § States: push our newer states; pull only when nothing is local; flag the rest.
+
+    `missing` holds ROMs with no local state at all; for those the newest server
+    state of an emulator we have an adapter for is pulled.
+    """
     label = STATE_LABEL.format(device_id)
     steps = []
+    for rom_id, local in (missing or {}).items():
+        usable = [st for st in server.get(rom_id, []) if st.emulator in (adapters or {})]
+        if not usable:
+            continue
+        newest = max(usable, key=lambda st: st.updated_at)
+        path = adapters[newest.emulator].target_path(local, layout, "state", newest.file_name)
+        steps.append(Step("pull-state", roms[rom_id], path, "no local state", server_state=newest))
     for rom, s in inv.states:
         mine = [st for st in server.get(rom.id, []) if label in st.labels
                 and st.emulator == s.emulator and st.file_name == s.path.name]

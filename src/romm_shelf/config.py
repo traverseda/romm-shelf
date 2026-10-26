@@ -33,6 +33,12 @@ class Settings(BaseSettings):
 
     credentials_path: Path = Path("~/.config/romm-shelf/credentials.json")
 
+    es_settings: Path = Path("~/.var/app/net.retrodeck.retrodeck/config/ES-DE/settings/es_settings.xml")
+    systemd_user_dir: Path = Path("~/.config/systemd/user")
+
+    port: int = 8765
+    """The daemon's port on 127.0.0.1; the ES-DE hook scripts call it."""
+
     device_name: str = "romm-shelf"
     device_hostname: str = socket.gethostname()
     """Used with the platform to make device registration idempotent on the server."""

@@ -5,6 +5,8 @@ CLI action with a different front end (design.md § Parity). The library is
 recomputed on start and on /api/refresh; nothing is written to disk.
 """
 
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -12,13 +14,16 @@ from threading import Lock
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from loguru import logger
 
+from romm_shelf import sleep
 from romm_shelf.adapters import load_adapters
 from romm_shelf.auth import Session, load_session
 from romm_shelf.config import Settings
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom, match, scan_local
 from romm_shelf.romm import Rom
+from romm_shelf.service import SyncResult, rom_for_path, sync_roms
 
 WEB = Path(__file__).parent / "web"
 
@@ -38,6 +43,37 @@ class Shelf:
         self.adapters = load_adapters()
         self._lock = Lock()
         self._library: Library | None = None
+        # Files modified after this were not synced by this process yet. Kept in
+        # memory only: losing it on restart means the next sleep sync is smaller,
+        # never that anything is lost (the next game-end or manual sync catches up).
+        self.synced_until = time.time()
+
+    def rom_for_path(self, path: str) -> Rom | None:
+        for refresh in (False, True):  # a game downloaded since the last refresh
+            lib = self.library(refresh)
+            matched = [(l, lib.roms[i]) for i, l in lib.local.items()]
+            if rom := rom_for_path(path, self.layout, matched):
+                return rom
+        return None
+
+    def sync(self, rom_ids: list[int] | None, why: str) -> SyncResult:
+        started = time.time()
+        result = sync_roms(self.session, self.client, self.layout, self.adapters, rom_ids,
+                           remote=list(self.library().roms.values()))
+        self.synced_until = max(self.synced_until, started)
+        logger.info("{} sync of {}: {} steps, {} done, {} failed", why, rom_ids or "all",
+                    len(result.steps), result.done, result.failed)
+        return result
+
+    def changed_rom_ids(self) -> list[int]:
+        lib = self.library()
+        layout = self.layout
+        changed = set()
+        for rom_id, local in lib.local.items():
+            for adapter in self.adapters:
+                if any(s.path.stat().st_mtime > self.synced_until for s in adapter.saves_for(local, layout)):
+                    changed.add(rom_id)
+        return sorted(changed)
 
     @property
     def layout(self) -> RetroDeckLayout:
@@ -56,9 +92,35 @@ class Shelf:
             return self._library
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, *, watch_sleep: bool = True) -> FastAPI:
     shelf = Shelf(settings or Settings())
     app = FastAPI(title="romm-shelf")
+
+    if watch_sleep:
+        def before_sleep(what: str):
+            ids = shelf.changed_rom_ids()
+            if ids:
+                shelf.sync(ids, f"before {what}")
+        sleep.watch(before_sleep)
+
+    # ES-DE hooks (design.md § When sync runs). The scripts send the ROM path
+    # exactly as ES-DE passes it; RetroDECK sees the same paths as the host.
+    @app.post("/api/hook/game-start")
+    def game_start(rom: str):
+        r = shelf.rom_for_path(rom)
+        if r is None:
+            return {"synced": False, "reason": "not a RomM ROM"}
+        result = shelf.sync([r.id], "game-start")  # blocks: ES-DE waits, the emulator gets the pulled save
+        return {"synced": True, "rom_id": r.id, "steps": [s.describe() for s in result.steps],
+                "failed": result.failed}
+
+    @app.post("/api/hook/game-end", status_code=202)
+    def game_end(rom: str):
+        r = shelf.rom_for_path(rom)
+        if r is None:
+            return {"synced": False, "reason": "not a RomM ROM"}
+        threading.Thread(target=shelf.sync, args=([r.id], "game-end"), daemon=True).start()
+        return {"synced": "queued", "rom_id": r.id}
 
     def entry(rom: Rom, lib: Library) -> dict:
         return {
