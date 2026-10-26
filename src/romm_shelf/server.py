@@ -19,8 +19,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from romm_shelf import bios, sleep
-from romm_shelf import shelf as shelf_ops
+from romm_shelf import bios, mods, sleep
 from romm_shelf.adapters import load_adapters
 from romm_shelf.auth import Session, load_session
 from romm_shelf.config import Settings
@@ -124,9 +123,9 @@ class Shelf:
     def install(self, rom_id: int, job: dict) -> None:
         rom = self.library().roms[rom_id]
         try:
-            plan = shelf_ops.install_plan(rom, self.layout)
+            plan = mods.plan_install(rom, self.client, self.layout, list(self.library().roms.values()))
             job["current"] = f"downloading {plan.target.name}"
-            shelf_ops.install(plan, self.client, lambda d, t: job.update(done=d, total=t))
+            mods.run_install(plan, self.client, lambda d, t: job.update(done=d, total=t))
             self.rescan_local()
             # Pull any saves and states RomM has for it, so the first launch picks up where you left off.
             job["current"] = "restoring saves"
@@ -147,9 +146,10 @@ class Shelf:
         result = self.sync([rom_id], "uninstall")
         if result.failed:
             raise HTTPException(409, "save sync failed; the game was not removed")
-        shelf_ops.uninstall(local.path)
+        removed, kept = mods.plan_uninstall(local.path, self.layout, self.settings.fs_root)
+        mods.uninstall(removed)
         self.rescan_local()
-        return {"removed": str(local.path), "saves_kept": True}
+        return {"removed": [str(p) for p in removed], "kept": [str(p) for p in kept], "saves_kept": True}
 
     def changed_rom_ids(self) -> list[int]:
         lib = self.library()

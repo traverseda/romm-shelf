@@ -13,6 +13,7 @@ class RetroDeckLayout:
     saves: Path
     states: Path
     bios: Path
+    mods: Path
 
     @classmethod
     def load(cls, settings: Settings) -> "RetroDeckLayout":
@@ -23,4 +24,5 @@ class RetroDeckLayout:
             saves=settings.resolve(paths["saves_path"]),
             states=settings.resolve(paths["states_path"]),
             bios=settings.resolve(paths["bios_path"]),
+            mods=settings.resolve(paths.get("mods_path", f"{paths['rd_home_path']}/mods")),
         )

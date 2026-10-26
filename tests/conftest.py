@@ -25,7 +25,7 @@ def deck(tmp_path: Path) -> Path:
     base = "/home/deck/Emulation/retrodeck"
     cfg.write_text(json.dumps({"paths": {
         "rd_home_path": base, "roms_path": f"{base}/roms", "saves_path": f"{base}/saves",
-        "states_path": f"{base}/states", "bios_path": f"{base}/bios",
+        "states_path": f"{base}/states", "bios_path": f"{base}/bios", "mods_path": f"{base}/mods",
     }}))
     touch(rd / "roms/nes/Wizardry - The Knight of Diamonds.zip")
     touch(rd / "roms/nes/from_below_2020_09_16_v_1_0_0.nes")

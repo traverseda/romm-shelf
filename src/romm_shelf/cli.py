@@ -15,8 +15,7 @@ from romm_shelf.auth import device_login, load_session, save_credentials
 from romm_shelf.config import Settings
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import match, scan_local
-from romm_shelf import bios, external, hooks
-from romm_shelf import shelf as shelf_ops
+from romm_shelf import bios, external, hooks, mods
 from romm_shelf.service import rom_for_path, sync_roms
 from romm_shelf.sync import inventory, negotiate_payload
 
@@ -109,7 +108,7 @@ def get(
     rom = next((r for r in remote if r.id == rom_id), None)
     if rom is None:
         raise typer.BadParameter(f"no ROM {rom_id} in RomM")
-    p = shelf_ops.install_plan(rom, layout)
+    p = mods.plan_install(rom, client, layout, remote)
     typer.echo(p.describe())
     if plan:
         return
@@ -120,7 +119,7 @@ def get(
             bar.update(done - last[0])
             last[0] = done
 
-        shelf_ops.install(p, client, progress)
+        mods.run_install(p, client, progress)
     result = sync_roms(session, client, layout, load_adapters(), [rom_id], restore=True, remote=remote)
     for step in result.steps:
         typer.echo(step.describe())
@@ -139,15 +138,40 @@ def rm(
     local = next((l for l, r in m.matched if r.id == rom_id), None)
     if local is None:
         raise typer.BadParameter(f"ROM {rom_id} is not on this device")
-    typer.echo(f"remove {local.path} (saves kept)")
+    removed, kept = mods.plan_uninstall(local.path, layout, settings.fs_root)
+    for path in removed:
+        typer.echo(f"remove {path}")
+    for path in kept:
+        typer.echo(f"keep   {path}")
+    typer.echo("# saves kept")
     if plan:
         return
     result = sync_roms(session, client, layout, load_adapters(), [rom_id], remote=remote)
     if result.failed:
         typer.echo("# save sync failed; not removing the game")
         raise typer.Exit(1)
-    shelf_ops.uninstall(local.path)
+    mods.uninstall(removed)
     typer.echo("# removed. Restart ES-DE to drop it from the game list.")
+
+
+mod_app = typer.Typer(no_args_is_help=True, help="Dolphin game mods: a descriptor, a base disc and patch folders.")
+app.add_typer(mod_app, name="mod")
+
+
+@mod_app.command("pack")
+def mod_pack(
+    descriptor: Path,
+    out: Path,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would be packaged; write nothing")] = False,
+):
+    """Build the RomM folder for a mod installed here (roms/wii/X.json) under OUT/X/, without its save folders."""
+    settings = Settings()
+    layout = RetroDeckLayout.load(settings)
+    p = mods.pack_plan(descriptor.expanduser().absolute(), layout, out.expanduser().absolute(), settings.fs_root)
+    typer.echo(p.describe())
+    if plan:
+        return
+    typer.echo(f"# packaged {mods.pack(p)}. Copy it into RomM's roms/{descriptor.absolute().parent.name}/ and rescan.")
 
 
 bios_app = typer.Typer(no_args_is_help=True, help="BIOS/firmware: RomM is the source of truth; devices pull.")

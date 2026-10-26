@@ -52,15 +52,7 @@ def install(plan: InstallPlan, client: RommClient, progress: Progress | None = N
         if plan.multi:
             staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
             try:
-                with zipfile.ZipFile(part) as z:
-                    for member in z.namelist():  # refuse paths that escape the folder
-                        if Path(member).is_absolute() or ".." in Path(member).parts:
-                            raise ValueError(f"unsafe path in download: {member}")
-                    z.extractall(staging)
-                # RomM may wrap the files in a folder named after the game; unwrap it.
-                inner = list(staging.iterdir())
-                source = inner[0] if len(inner) == 1 and inner[0].is_dir() and inner[0].name == target.name else staging
-                source.rename(target)
+                unpack(part, staging, target.name).rename(target)
             finally:
                 shutil.rmtree(staging, ignore_errors=True)
             part.unlink()
@@ -70,6 +62,18 @@ def install(plan: InstallPlan, client: RommClient, progress: Progress | None = N
         part.unlink(missing_ok=True)
         raise
     return target
+
+
+def unpack(part: Path, staging: Path, name: str) -> Path:
+    """Unzip a multi-file download into staging; returns the folder holding the game's files."""
+    with zipfile.ZipFile(part) as z:
+        for member in z.namelist():  # refuse paths that escape the folder
+            if Path(member).is_absolute() or ".." in Path(member).parts:
+                raise ValueError(f"unsafe path in download: {member}")
+        z.extractall(staging)
+    # RomM may wrap the files in a folder named after the game; unwrap it.
+    inner = list(staging.iterdir())
+    return inner[0] if len(inner) == 1 and inner[0].is_dir() and inner[0].name == name else staging
 
 
 def uninstall(path: Path) -> None:

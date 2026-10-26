@@ -188,6 +188,17 @@ class RommClient:
                 if progress:
                     progress(done, total)
 
+    def rom_file(self, rom_id: int, file_name: str) -> str | None:
+        """One top-level file of a multi-file ROM, as text; None when the ROM has no such file."""
+        files = self._get(f"/roms/{rom_id}").get("files") or []
+        file = next((f for f in files if f["file_name"] == file_name and f.get("is_top_level")), None)
+        if file is None:
+            return None
+        # One id in file_ids streams that file as is, not zipped.
+        r = self.http.get(f"/roms/{rom_id}/content/{file_name}", params={"file_ids": file["id"]})
+        r.raise_for_status()
+        return r.text
+
     def firmware(self) -> list[dict]:
         return self._get("/firmware")
 

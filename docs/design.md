@@ -230,6 +230,42 @@ still on the server, or in the local backup folder.
 - **ES-DE refresh:** ES-DE has to rescan to see new games. The UI says so. A
   restart of ES-DE is possible, but it's an open question; see todo.md.
 
+## Mods
+
+Dolphin plays a Riivolution mod (Mario Kart Midnight, Wii Deluxe, …) through a
+*game mod descriptor*: a small JSON in `roms/wii/` that names a base disc
+(`base-file`) and one or more patch folders (`riivolution.patches[].root`). ES-DE
+lists the descriptor as a game. On its own it is useless: the game is the
+descriptor, the base disc and the patch folder together (`mods.py`).
+
+- **In RomM, one folder ROM per mod**, holding exactly what goes on the device:
+
+  ```
+  roms/wii/Mario Kart Midnight/
+    Mario Kart Midnight.json            → roms/wii/Mario Kart Midnight.json
+    mods/Dolphin/Mario Kart Midnight v1.5-beta/…  → <mods>/Dolphin/…
+  ```
+
+  The descriptor's paths are relative: `./<base disc>` and
+  `../../mods/Dolphin/<folder>`, which from `roms/wii/` is RetroDECK's own
+  `mods/` folder. So the file works unchanged on any RetroDECK install, and
+  romm-shelf never edits it on install.
+- **The base disc is its own ROM**, shared by every mod for that game. Installing
+  a mod installs the base too when it's missing; removing a mod keeps it.
+- **Matching.** A local `roms/wii/X.json` matches the RomM folder ROM `X`.
+- **Saves inside the mod.** Some mods redirect their save into the patch folder
+  (`<savegame external="…">` in the Riivolution XML). Those folders are left out
+  of the package and never deleted by an uninstall, which removes everything else
+  in the patch folder. Everything else is derived from the descriptor and the
+  XML, so nothing is recorded about what was installed.
+- **Making a package:** `romm-shelf mod pack roms/wii/X.json OUT` builds the folder
+  above from an installed mod: it copies the patch folders without their save
+  folders and writes the descriptor with relative paths. Getting `OUT` into RomM's
+  library is the server admin's job; RomM's upload API only takes single files.
+
+Mods that aren't descriptor-based (a WAD plus SD card files, like Insane Kart
+Wii) are out of scope; see todo.md.
+
 ## External emulators
 
 RetroDECK can't take add-on components: they're baked into the flatpak. An
