@@ -15,6 +15,7 @@ from romm_shelf.config import Settings
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import match, scan_local
 from romm_shelf import hooks
+from romm_shelf import shelf as shelf_ops
 from romm_shelf.service import rom_for_path, sync_roms
 from romm_shelf.sync import inventory, negotiate_payload
 
@@ -94,6 +95,58 @@ def serve():
     from romm_shelf.server import create_app
 
     uvicorn.run(create_app(), host="127.0.0.1", port=Settings().port, log_level="info")
+
+
+@app.command()
+def get(
+    rom_id: int,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would be downloaded; download nothing")] = False,
+):
+    """Install a game from RomM, then pull any saves and states RomM has for it."""
+    settings, session, client, layout = _context()
+    remote = list(client.roms())
+    rom = next((r for r in remote if r.id == rom_id), None)
+    if rom is None:
+        raise typer.BadParameter(f"no ROM {rom_id} in RomM")
+    p = shelf_ops.install_plan(rom, layout)
+    typer.echo(p.describe())
+    if plan:
+        return
+    with typer.progressbar(length=p.size, label=rom.name or rom.fs_name) as bar:
+        last = [0]
+
+        def progress(done, total):
+            bar.update(done - last[0])
+            last[0] = done
+
+        shelf_ops.install(p, client, progress)
+    result = sync_roms(session, client, layout, load_adapters(), [rom_id], restore=True, remote=remote)
+    for step in result.steps:
+        typer.echo(step.describe())
+    typer.echo("# installed. Restart ES-DE to see it in the game list.")
+
+
+@app.command()
+def rm(
+    rom_id: int,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would be removed; remove nothing")] = False,
+):
+    """Remove a game from this device. Its saves are pushed to RomM first and kept on disk."""
+    settings, session, client, layout = _context()
+    remote = list(client.roms())
+    m = match(scan_local(layout.roms), remote)
+    local = next((l for l, r in m.matched if r.id == rom_id), None)
+    if local is None:
+        raise typer.BadParameter(f"ROM {rom_id} is not on this device")
+    typer.echo(f"remove {local.path} (saves kept)")
+    if plan:
+        return
+    result = sync_roms(session, client, layout, load_adapters(), [rom_id], remote=remote)
+    if result.failed:
+        typer.echo("# save sync failed; not removing the game")
+        raise typer.Exit(1)
+    shelf_ops.uninstall(local.path)
+    typer.echo("# removed. Restart ES-DE to drop it from the game list.")
 
 
 hooks_app = typer.Typer(no_args_is_help=True, help="ES-DE hooks and the daemon's systemd unit.")

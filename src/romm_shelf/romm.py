@@ -37,6 +37,7 @@ class Rom(_Model):
     name: str | None = None
     md5_hash: str | None = None
     summary: str | None = None
+    has_multiple_files: bool = False
     path_cover_small: str | None = None
     path_cover_large: str | None = None
 
@@ -173,6 +174,19 @@ class RommClient:
 
     def confirm_download(self, save_id: int, *, device_id: str, content_hash: str) -> None:
         self._post(f"/saves/{save_id}/downloaded", {"device_id": device_id, "content_hash": content_hash})
+
+    def download_rom(self, rom: "Rom", out, progress=None) -> None:
+        """Stream a ROM: the file itself, or a zip of all its files for multi-file ROMs."""
+        name = rom.fs_name + (".zip" if rom.has_multiple_files else "")
+        with self.http.stream("GET", f"/roms/{rom.id}/content/{name}", timeout=None) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("content-length") or rom.fs_size_bytes)
+            done = 0
+            for chunk in r.iter_bytes(1 << 20):
+                out.write(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, total)
 
     def saves(self, rom_id: int) -> list[dict]:
         return self._get("/saves", rom_id=rom_id)

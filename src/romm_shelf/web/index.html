@@ -36,7 +36,8 @@
     <div v-for="r in shown" :key="r.id" class="card relative-position" tabindex="0" data-nav @click="open(r)">
       <img v-if="r.cover" class="cover" :src="r.cover" loading="lazy" alt="">
       <div v-else class="cover flex flex-center text-grey-6">{{ r.platform }}</div>
-      <q-badge v-if="r.status === 'on-device'" class="badge" color="positive">on device</q-badge>
+      <q-badge v-if="jobs[r.id]?.status === 'running'" class="badge" color="primary">{{ pct(jobs[r.id]) }}%</q-badge>
+      <q-badge v-else-if="r.status === 'on-device'" class="badge" color="positive">on device</q-badge>
       <div class="title">{{ r.name }}</div>
     </div>
   </div>
@@ -60,8 +61,24 @@
         </div>
         <div class="q-mt-sm text-grey-5">On RomM: {{ detail.server_saves }} saves, {{ detail.server_states }} states</div>
       </q-card-section>
-      <q-card-actions align="right">
-        <q-btn flat label="Close (B)" data-nav data-nav-default @click="detailOpen = false"></q-btn>
+      <q-card-section v-if="job">
+        <q-linear-progress :value="job.total ? job.done / job.total : 0" size="10px" rounded
+                           :color="job.status === 'failed' ? 'negative' : 'primary'"></q-linear-progress>
+        <div class="q-mt-xs text-grey-5">
+          <span v-if="job.status === 'running'">Downloading… {{ size(job.done) }} of {{ size(job.total) }}</span>
+          <span v-else-if="job.status === 'done'">Installed. Restart ES-DE to see it in the game list.</span>
+          <span v-else class="text-negative">Failed: {{ job.error }}</span>
+        </div>
+      </q-card-section>
+      <q-card-section v-if="message" class="text-grey-4">{{ message }}</q-card-section>
+      <q-card-actions align="right" class="q-gutter-sm">
+        <q-btn v-if="detail.status === 'remote' && job?.status !== 'running'" color="primary" unelevated
+               :label="`Install (${size(detail.size)})`" data-nav data-nav-default @click="install"></q-btn>
+        <q-btn v-if="detail.status === 'on-device'" :color="confirmRemove ? 'negative' : 'grey-8'" unelevated
+               :label="confirmRemove ? 'Press again to uninstall' : 'Uninstall'" :loading="busy" data-nav
+               @click="uninstall"></q-btn>
+        <q-btn flat label="Close (B)" data-nav :data-nav-default="detail.status === 'on-device' || job?.status === 'running' ? '' : null"
+               @click="detailOpen = false"></q-btn>
       </q-card-actions>
     </q-card>
   </q-dialog>
@@ -81,7 +98,43 @@ const app = createApp({
     const platform = ref(null);
     const loading = ref(true), error = ref(null);
     const detail = ref(null), detailOpen = ref(false);
-    let lastFocus = null;
+    const jobs = ref({}), message = ref(null), busy = ref(false), confirmRemove = ref(false);
+    const job = computed(() => detail.value && jobs.value[detail.value.id]);
+    let lastFocus = null, polling = null;
+
+    async function pollJobs() {
+      const list = await (await fetch("/api/jobs")).json();
+      const before = jobs.value;
+      jobs.value = Object.fromEntries(list.map((j) => [j.rom_id, j]));
+      const finished = list.some((j) => j.status === "done" && before[j.rom_id]?.status === "running");
+      if (finished) await reload();
+      if (!list.some((j) => j.status === "running")) { clearInterval(polling); polling = null; }
+    }
+    function watchJobs() { if (!polling) polling = setInterval(pollJobs, 500); pollJobs(); }
+
+    async function reload() {  // re-read the library (status badges) and the open game's details
+      lib.value = await (await fetch("/api/library")).json();
+      if (detail.value) detail.value = await (await fetch(`/api/rom/${detail.value.id}`)).json();
+    }
+
+    async function install() {
+      message.value = null;
+      const res = await fetch(`/api/rom/${detail.value.id}/install`, { method: "POST" });
+      if (!res.ok) { message.value = (await res.json()).detail; return; }
+      watchJobs();
+    }
+
+    async function uninstall() {
+      if (!confirmRemove.value) { confirmRemove.value = true; return; }
+      busy.value = true; message.value = null;
+      const res = await fetch(`/api/rom/${detail.value.id}/uninstall`, { method: "POST" });
+      busy.value = false; confirmRemove.value = false;
+      message.value = res.ok ? "Uninstalled. Saves were synced and kept. Restart ES-DE to drop it from the list."
+                             : `Not removed: ${(await res.json()).detail}`;
+      await reload();
+      await nextTick(); focusFirst();
+    }
+    const pct = (j) => Math.floor(100 * j.done / (j.total || 1));
 
     const platforms = computed(() => lib.value.platforms);
     const shown = computed(() => lib.value.roms.filter((r) => r.platform === platform.value));
@@ -101,6 +154,7 @@ const app = createApp({
 
     async function open(r) {
       lastFocus = document.activeElement;
+      message.value = null; confirmRemove.value = false;
       detail.value = await (await fetch(`/api/rom/${r.id}`)).json();
       detailOpen.value = true;
       await nextTick(); setTimeout(() => focusFirst(), 50);
@@ -123,7 +177,9 @@ const app = createApp({
     const when = (t) => new Date(t * 1000).toLocaleString();
 
     load();
-    return { platforms, platform, shown, loading, error, detail, detailOpen, open, restoreFocus, size, when };
+    watchJobs();  // pick up downloads already running in the daemon
+    return { platforms, platform, shown, loading, error, detail, detailOpen, open, restoreFocus, size, when,
+             jobs, job, message, busy, confirmRemove, install, uninstall, pct };
   },
 });
 app.use(Quasar, { config: { dark: true } });

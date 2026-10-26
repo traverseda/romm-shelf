@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
+from romm_shelf import shelf as shelf_ops
 from romm_shelf import sleep
 from romm_shelf.adapters import load_adapters
 from romm_shelf.auth import Session, load_session
@@ -47,6 +48,7 @@ class Shelf:
         # memory only: losing it on restart means the next sleep sync is smaller,
         # never that anything is lost (the next game-end or manual sync catches up).
         self.synced_until = time.time()
+        self.jobs: dict[int, dict] = {}  # in-memory progress for the UI; not state anyone relies on
 
     def rom_for_path(self, path: str) -> Rom | None:
         for refresh in (False, True):  # a game downloaded since the last refresh
@@ -64,6 +66,43 @@ class Shelf:
         logger.info("{} sync of {}: {} steps, {} done, {} failed", why, rom_ids or "all",
                     len(result.steps), result.done, result.failed)
         return result
+
+    def rescan_local(self) -> None:
+        """After an install or uninstall: re-match local files without refetching the library."""
+        with self._lock:
+            if self._library is not None:
+                m = match(scan_local(self.layout.roms), self._library.roms.values())
+                self._library.local = {r.id: l for l, r in m.matched}
+                self._library.local_only = m.local_only
+
+    def install(self, rom_id: int) -> None:
+        rom = self.library().roms[rom_id]
+        job = self.jobs[rom_id] = {"rom_id": rom_id, "action": "install", "done": 0,
+                                   "total": rom.fs_size_bytes, "status": "running", "error": None}
+        try:
+            plan = shelf_ops.install_plan(rom, self.layout)
+            shelf_ops.install(plan, self.client, lambda d, t: job.update(done=d, total=t))
+            self.rescan_local()
+            # Pull any saves and states RomM has for it, so the first launch picks up where you left off.
+            sync_roms(self.session, self.client, self.layout, self.adapters, [rom_id], restore=True,
+                      remote=list(self.library().roms.values()))
+            job["status"] = "done"
+        except Exception as e:
+            logger.exception("install of {} failed", rom_id)
+            job.update(status="failed", error=str(e))
+
+    def uninstall(self, rom_id: int) -> dict:
+        lib = self.library()
+        local = lib.local.get(rom_id)
+        if local is None:
+            raise HTTPException(404, "not on this device")
+        # Push its saves first; uninstalling never loses progress. A failed push stops the removal.
+        result = self.sync([rom_id], "uninstall")
+        if result.failed:
+            raise HTTPException(409, "save sync failed; the game was not removed")
+        shelf_ops.uninstall(local.path)
+        self.rescan_local()
+        return {"removed": str(local.path), "saves_kept": True}
 
     def changed_rom_ids(self) -> list[int]:
         lib = self.library()
@@ -170,6 +209,26 @@ def create_app(settings: Settings | None = None, *, watch_sleep: bool = True) ->
             "server_saves": len(shelf.client.saves(rom_id)),
             "server_states": len(shelf.client.states(rom_id)),
         }
+
+    @app.post("/api/rom/{rom_id}/install", status_code=202)
+    def install(rom_id: int):
+        lib = shelf.library()
+        if rom_id not in lib.roms:
+            raise HTTPException(404)
+        if rom_id in lib.local:
+            raise HTTPException(409, "already on this device")
+        if shelf.jobs.get(rom_id, {}).get("status") == "running":
+            return shelf.jobs[rom_id]
+        threading.Thread(target=shelf.install, args=(rom_id,), daemon=True).start()
+        return {"rom_id": rom_id, "status": "running"}
+
+    @app.post("/api/rom/{rom_id}/uninstall")
+    def uninstall(rom_id: int):
+        return shelf.uninstall(rom_id)
+
+    @app.get("/api/jobs")
+    def jobs():
+        return list(shelf.jobs.values())
 
     @app.get("/api/cover/{rom_id}")
     def cover(rom_id: int):
