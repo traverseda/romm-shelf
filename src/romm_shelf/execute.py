@@ -182,5 +182,10 @@ def _run_one(step: Step, client: RommClient, device_id: str, layout: RetroDeckLa
             data = client.download_state(step.server_state.id)
             backup(step.path, _root_for(step.path, layout), stamp)
             _write_atomic(step.path, data)
+            # States are compared by time (RomM keeps no hash for them), so a pulled
+            # state carries the server's timestamp; otherwise it looks "newer" and
+            # the next sync pushes the same bytes back.
+            ts = step.server_state.updated_at.timestamp()
+            os.utime(step.path, (ts, ts))
         case "flag":
             pass  # surfaced to the user; nothing to execute

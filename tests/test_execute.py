@@ -107,6 +107,25 @@ def test_states_pull_newest_when_none_local(layout, remote):
     assert step.path == layout.states / "nes" / "Wizardry - The Knight of Diamonds.state.auto"
 
 
+def test_pulled_state_is_not_pushed_back(layout, remote):
+    inv, locals_, adapters = _setup(layout, remote)
+    then = datetime(2026, 10, 20, tzinfo=UTC)
+    theirs = _state(5, [STATE_LABEL.format("me")], then, "Wizardry [2026-10-20].state.auto")
+    roms = {r.id: r for r in remote}
+    [pull] = [s for s in plan_states(inv, {1006: [theirs]}, "me", missing={1006: locals_[1006]}, roms=roms,
+                                     adapters=adapters, layout=layout) if s.action == "pull-state"]
+
+    class Client(FakeClient):
+        def download_state(self, state_id):
+            return b"state bytes"
+
+    run([pull], Client(), device_id="me", layout=layout, session_id=None)
+    # Now local; the next plan must see our server copy as current, not push it again.
+    theirs = theirs.model_copy(update={"file_name": pull.path.name})
+    inv, _, _ = _setup(layout, remote)
+    assert [s for s in plan_states(inv, {1006: [theirs]}, "me") if s.rom.id == 1006] == []
+
+
 def test_states_skip_when_our_copy_is_current(layout, remote):
     inv, _, _ = _setup(layout, remote)
     future = datetime.now(UTC) + timedelta(days=1)
