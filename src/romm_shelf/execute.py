@@ -8,6 +8,7 @@ backup folder beside the saves, so no step can lose data.
 import hashlib
 import os
 import shutil
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ from typing import Literal
 
 from loguru import logger
 
+from romm_shelf import archive
 from romm_shelf.adapters import Adapter, LocalSave
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom
@@ -45,11 +47,14 @@ class Step:
 def plan_saves(
     response: NegotiateResponse, inv: LocalInventory, locals_by_id: dict[int, LocalRom],
     adapters: dict[str, Adapter], layout: RetroDeckLayout,
+    restore: Callable[[SyncOperation, Adapter], Path | None] | None = None,
+    roms: dict[int, Rom] | None = None,
 ) -> list[Step]:
+    """`restore` finds a place for a save of a game that isn't installed (save-first adapters)."""
     # RomM pairs saves on (rom_id, slot) and renames files it stores (it appends an
     # upload timestamp), so the server's file_name never identifies a local file.
     by_key = {(rom.id, s.slot): (rom, s) for rom, s in inv.saves}
-    roms = {rom.id: rom for rom, _ in inv.saves}
+    roms = {**(roms or {}), **{rom.id: rom for rom, _ in inv.saves}}
     steps = []
     for op in response.operations:
         hit = by_key.get((op.rom_id, op.slot))
@@ -63,11 +68,14 @@ def plan_saves(
         elif op.action == "download":
             local = locals_by_id.get(op.rom_id)
             adapter = adapters.get(op.emulator or "")
+            path = None
             if hit:
                 path = hit[1].path
             elif local and adapter:
-                path = adapter.target_path(local, layout, "save", op.file_name)
-            else:
+                path = adapter.target_path(local, layout, "save", op.file_name, op.slot)
+            if path is None and adapter and restore:
+                path = restore(op, adapter)
+            if path is None:
                 logger.warning("no local place for save {} of rom {}", op.file_name, op.rom_id)
                 continue
             rom = roms.get(op.rom_id) or hit and hit[0]
@@ -121,8 +129,16 @@ def backup(path: Path, root: Path, stamp: str) -> Path | None:
         return None
     dest = root / BACKUP_DIR / stamp / path.relative_to(root)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(path, dest)
+    if path.is_dir():
+        shutil.copytree(path, dest, dirs_exist_ok=True)
+    else:
+        shutil.copy2(path, dest)
     return dest
+
+
+def is_folder_save(file_name: str) -> bool:
+    """romm-shelf uploads folder saves as <folder>.zip; RomM keeps the suffix when it renames them."""
+    return file_name.endswith(".zip")
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
@@ -162,23 +178,28 @@ def _root_for(path: Path, layout: RetroDeckLayout) -> Path:
 
 def _run_one(step: Step, client: RommClient, device_id: str, layout: RetroDeckLayout,
              session_id: int | None, stamp: str) -> None:
-    md5 = lambda p: hashlib.md5(p.read_bytes()).hexdigest()  # noqa: E731
     match step.action:
-        case "upload":
-            client.upload_save(step.rom.id, step.path, slot=step.local.slot, emulator=step.local.emulator,
-                               device_id=device_id, content_hash=md5(step.path), session_id=session_id)
-        case "archive":
-            client.upload_save(step.rom.id, step.path, slot=None, emulator=step.local.emulator,
-                               device_id=device_id, content_hash=md5(step.path), session_id=session_id)
+        case "upload" | "archive":
+            slot = step.local.slot if step.action == "upload" else None
+            data = step.local.content()
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / step.local.file_name
+                path.write_bytes(data)
+                client.upload_save(step.rom.id, path, slot=slot, emulator=step.local.emulator,
+                                   device_id=device_id, content_hash=hashlib.md5(data).hexdigest(),
+                                   session_id=session_id)
         case "download":
             data = client.download_save(step.op.save_id, device_id=device_id, session_id=session_id)
             backup(step.path, _root_for(step.path, layout), stamp)
-            _write_atomic(step.path, data)
+            if is_folder_save(step.op.file_name):
+                archive.replace(step.path, data)
+            else:
+                _write_atomic(step.path, data)
             client.confirm_download(step.op.save_id, device_id=device_id,
                                     content_hash=hashlib.md5(data).hexdigest())
         case "backup-only":
             backup(step.path, _root_for(step.path, layout), stamp)
-            step.path.unlink()
+            shutil.rmtree(step.path) if step.path.is_dir() else step.path.unlink()
         case "push-state":
             if step.server_state:
                 client.replace_state(step.server_state.id, step.path)

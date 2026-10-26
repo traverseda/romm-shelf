@@ -13,6 +13,7 @@ dependencies = [
     "pydantic-settings>=2.4",
     "typer>=0.12",
     "jeepney>=0.9.0",
+    "cryptography>=42",
 ]
 
 [project.scripts]
@@ -23,6 +24,8 @@ romm-shelf = "romm_shelf.cli:app"
 # is no privileged built-in loading path.
 [project.entry-points."romm_shelf.adapters"]
 retroarch = "romm_shelf_retroarch:RetroArchAdapter"
+dolphin = "romm_shelf_dolphin:DolphinAdapter"
+eden = "romm_shelf_eden:EdenAdapter"
 
 [project.entry-points."romm_shelf.externals"]
 eden = "romm_shelf_eden:EDEN"
@@ -35,7 +38,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/romm_shelf", "src/romm_shelf_retroarch", "src/romm_shelf_eden"]
+packages = ["src/romm_shelf", "src/romm_shelf_retroarch", "src/romm_shelf_dolphin", "src/romm_shelf_eden"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

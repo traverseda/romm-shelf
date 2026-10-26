@@ -10,7 +10,7 @@ from typing import Annotated
 import typer
 from loguru import logger
 
-from romm_shelf.adapters import load_adapters
+from romm_shelf.adapters import DiscReader, load_adapters
 from romm_shelf.auth import device_login, load_session, save_credentials
 from romm_shelf.config import Settings
 from romm_shelf.layout import RetroDeckLayout
@@ -394,11 +394,13 @@ def sync(
     settings, session, client, layout = _context()
     adapters = load_adapters()
     if plan and offline:
-        m = match(scan_local(layout.roms), client.roms())
+        remote = list(client.roms())
+        m = match(scan_local(layout.roms), remote)
         matched = [(l, r) for l, r in m.matched if all_roms or r.id in rom]
-        inv = inventory(matched, adapters, layout)
+        inv = inventory(matched, adapters, layout, remote=[r for r in remote if all_roms or r.id in rom],
+                        reader=DiscReader(client, {r.id: l for l, r in matched}))
         payload = negotiate_payload(inv, adapters, device_id=session.device_id,
-                                    rom_ids=sorted({r.id for _, r in matched}))
+                                    rom_ids=sorted({r.id for _, r in matched} | {r.id for r, _ in inv.saves}))
         payload.restore_unlisted = restore
         typer.echo(json.dumps(payload.model_dump(mode="json", exclude_none=True), indent=2))
         return
@@ -408,6 +410,8 @@ def sync(
                        plan_only=plan, restore=restore, states=states)
     for step in result.steps:
         typer.echo(step.describe())
+    for save in result.unmatched:
+        typer.echo(f"# not on RomM, not synced: {save.path}")
     counts = Counter(s.action for s in result.steps)
     typer.echo("# " + (", ".join(f"{k}: {v}" for k, v in sorted(counts.items())) or "nothing to do"))
     if not plan:

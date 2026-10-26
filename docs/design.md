@@ -105,6 +105,47 @@ Real save layouts vary a lot. This is what the test Deck (RetroDECK 0.10.3b) has
 Directory-based saves are uploaded as a single `.zip` with a stable name. RomM
 treats a save as one opaque file.
 
+A folder save is zipped deterministically (sorted names, fixed timestamps), so
+the same files always give the same `content_hash` and an unchanged save is never
+uploaded again. Its time is that of the newest file in it. On download the old
+folder goes to the backup folder whole, and the new one replaces it in one rename.
+romm-shelf treats any server save whose name ends in `.zip` as a folder save,
+because romm-shelf is what names them.
+
+### Finding saves from the save side
+
+The RetroArch adapter starts from a ROM on the device and looks for its saves.
+That misses the saves that matter most once a game is removed: the ROM is gone,
+the save stays, and nothing would ever upload it. Adapters for emulators that key
+saves by a game ID (Dolphin, Eden) work the other way round:
+
+1. List the saves on disk and the game ID each belongs to.
+2. Work out the game ID of every RomM ROM on that system. A ROM whose name holds
+   the ID (`[0100…]` for Switch) needs nothing more. Otherwise the ID is in the
+   first bytes of the disc. Those bytes are read from the local file when the game
+   is installed, and from RomM with an HTTP range request when it isn't: 256
+   bytes, not the whole disc.
+3. Pair them. A save that matches no RomM ROM is listed by `sync --plan` as not on
+   RomM and never uploaded.
+
+Nothing is cached between runs. A full sync does about one small range read per
+GameCube or Wii ROM.
+
+| Adapter | Saves | Game ID | Slot |
+|---|---|---|---|
+| `dolphin`, GameCube | `saves/gc/dolphin/<region>/Card A/<maker>-<id>-*.gci`, one file each | disc header: ID and maker code | `gci:<file name>` |
+| `dolphin`, Wii | `saves/wii/dolphin/title/<type>/<hex id>/data/`, a folder | disc header (RVZ/WIA, WBFS, ISO) | `nand:<type>` |
+| `dolphin`, mods | Pulsar saves in `shared2/Pulsar/<patch id>/`, and Riivolution save folders inside the patch folder | from the installed descriptor and its XML | `pulsar:<id>`, `riivolution:<path>` |
+| `eden` | `saves/switch/eden/nand/user/save/0000000000000000/<profile>/<title id>/`, a folder | `[title id]` in the file name, or the ticket name in an NSP's header | `account`, `device` |
+
+Where a save goes on a device that has never had it: from the slot and the game
+ID, never from RomM's stored file name (RomM renames uploads). An Eden save goes
+to the profile that already has the most saves; with no profile yet, it isn't
+restored.
+
+Mod saves belong to the mod's ROM. Mario Kart Wii's own NAND save belongs to the
+base disc, which every mod reads too.
+
 **Shared memory cards** don't fit RomM's one-save-per-ROM model. In phase 1 they
 are not synced. The UI must say so per game rather than silently skipping them.
 See [todo.md](../todo.md).

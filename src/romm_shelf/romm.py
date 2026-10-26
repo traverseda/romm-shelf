@@ -211,6 +211,20 @@ class RommClient:
                     progress(done, total)
         return sent
 
+    def rom_range(self, rom: "Rom", offset: int, size: int) -> bytes:
+        """Bytes of a single-file ROM (RomM honours Range), for reading a disc or container header."""
+        with self.http.stream("GET", f"/roms/{rom.id}/content/{rom.fs_name}",
+                              headers={"Range": f"bytes={offset}-{offset + size - 1}"}) as r:
+            r.raise_for_status()
+            if r.status_code != 206:  # streaming, so a server that ignores Range doesn't send a whole disc
+                raise RommError(f"RomM ignored the range request for ROM {rom.id}")
+            data = b""
+            for chunk in r.iter_bytes():
+                data += chunk
+                if len(data) >= size:
+                    break
+        return data[:size]
+
     def rom_file(self, rom_id: int, file_name: str) -> str | None:
         """One top-level file of a multi-file ROM, as text; None when the ROM has no such file."""
         files = self._get(f"/roms/{rom_id}").get("files") or []

@@ -47,7 +47,8 @@ class RetroArchAdapter:
             return []
         return sorted(p for p in folder.iterdir() if p.is_file() and p.name.startswith(stem + "."))
 
-    def target_path(self, rom: LocalRom, layout: RetroDeckLayout, kind: str, file_name: str) -> Path:
+    def target_path(self, rom: LocalRom, layout: RetroDeckLayout, kind: str, file_name: str,
+                    slot: str | None = None) -> Path:
         """The name RetroArch will look for, built from the ROM, never from the server's file name.
 
         RomM stores "Game [2026-10-26_15-09-31].srm"; RetroArch only reads "Game.srm".

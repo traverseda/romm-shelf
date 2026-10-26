@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
 
-from romm_shelf.adapters import Adapter
+from romm_shelf.adapters import Adapter, DiscReader, LocalSave
 from romm_shelf.auth import Session
 from romm_shelf.execute import Step, plan_saves, plan_states, run
 from romm_shelf.layout import RetroDeckLayout
@@ -24,6 +24,8 @@ class SyncResult:
     steps: list[Step] = field(default_factory=list)
     done: int = 0
     failed: int = 0
+    unmatched: list[LocalSave] = field(default_factory=list)
+    """Saves that match no RomM ROM (full syncs only): never uploaded."""
 
 
 def rom_for_path(path: str | Path, layout: RetroDeckLayout, matched: list[tuple[LocalRom, Rom]]) -> Rom | None:
@@ -48,14 +50,26 @@ def sync_roms(
     progress(result, step, error) is called after each step; result.steps holds the whole plan.
     """
     with SYNC_LOCK:
-        m = match(scan_local(layout.roms), remote if remote is not None else client.roms())
+        remote = list(remote if remote is not None else client.roms())
+        m = match(scan_local(layout.roms), remote)
         matched = [(l, r) for l, r in m.matched if rom_ids is None or r.id in rom_ids]
-        inv = inventory(matched, adapters, layout)
+        in_scope = [r for r in remote if rom_ids is None or r.id in rom_ids]
         locals_by_id = {r.id: l for l, r in matched}
+        reader = DiscReader(client, locals_by_id)
+        inv = inventory(matched, adapters, layout, remote=in_scope, reader=reader)
         by_emulator = {a.emulator: a for a in adapters}
+        roms_by_id = {r.id: r for r in in_scope}
+
+        def restore_to(op, adapter) -> Path | None:
+            # A save RomM has for a game that isn't installed here: save-first adapters know where it goes.
+            if not hasattr(adapter, "restore_path") or op.rom_id not in roms_by_id:
+                return None
+            return adapter.restore_path(roms_by_id[op.rom_id], layout, reader, op.slot)
+
         # RomM takes at most 500 rom_ids per negotiation, so a full sync is one
         # server session per batch; each batch carries only its own ROMs' saves.
-        ids = sorted(locals_by_id)
+        # Saves of games that aren't installed count too (design.md § Finding saves from the save side).
+        ids = sorted(set(locals_by_id) | {r.id for r, _ in inv.saves} | {r.id for r, _ in inv.states})
         sessions: list[tuple[int, list[Step]]] = []
         for i in range(0, max(len(ids), 1), NEGOTIATE_BATCH):
             payload = negotiate_payload(inv, adapters, device_id=session.device_id,
@@ -63,8 +77,10 @@ def sync_roms(
             payload.restore_unlisted = restore
             response = client.negotiate(payload)
             sessions.append((response.session_id,
-                             plan_saves(response, inv, locals_by_id, by_emulator, layout)))
-        result = SyncResult(steps=[s for _, steps in sessions for s in steps])
+                             plan_saves(response, inv, locals_by_id, by_emulator, layout,
+                                        restore=restore_to, roms=roms_by_id)))
+        result = SyncResult(steps=[s for _, steps in sessions for s in steps],
+                            unmatched=inv.unmatched if rom_ids is None else [])
         state_steps: list[Step] = []
         if states:
             with_local = {r.id for r, _ in inv.states}

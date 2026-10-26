@@ -6,8 +6,9 @@ and are planned separately (see design.md § States).
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from romm_shelf.adapters import Adapter, LocalSave
+from romm_shelf.adapters import Adapter, DiscReader, LocalSave
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom
 from romm_shelf.romm import NegotiatePayload, Rom
@@ -17,17 +18,39 @@ from romm_shelf.romm import NegotiatePayload, Rom
 class LocalInventory:
     saves: list[tuple[Rom, LocalSave]] = field(default_factory=list)
     states: list[tuple[Rom, LocalSave]] = field(default_factory=list)
+    unmatched: list[LocalSave] = field(default_factory=list)
+    """Saves on disk that match no RomM ROM, so they can't be synced."""
 
 
 def inventory(
-    matched: Iterable[tuple[LocalRom, Rom]], adapters: Iterable[Adapter], layout: RetroDeckLayout
+    matched: Iterable[tuple[LocalRom, Rom]], adapters: Iterable[Adapter], layout: RetroDeckLayout,
+    *, remote: list[Rom] | None = None, reader: DiscReader | None = None,
 ) -> LocalInventory:
+    """Saves per ROM: from installed ROMs, and with `remote`, from saves whose game isn't installed.
+
+    `remote` is the RomM ROMs in scope (all of them for a full sync, one for a hook).
+    """
     inv = LocalInventory()
     adapters = list(adapters)
-    for local, remote in matched:
+    seen: set[tuple[int, Path]] = set()
+
+    def add(rom: Rom, save: LocalSave) -> None:
+        if (rom.id, save.path) not in seen:
+            seen.add((rom.id, save.path))
+            (inv.saves if save.kind == "save" else inv.states).append((rom, save))
+
+    for local, rom in matched:
         for adapter in adapters:
             for save in adapter.saves_for(local, layout):
-                (inv.saves if save.kind == "save" else inv.states).append((remote, save))
+                add(rom, save)
+    if remote is not None:
+        reader = reader or DiscReader(None, {r.id: l for l, r in matched})
+        for adapter in adapters:
+            if hasattr(adapter, "discover"):
+                paired, unmatched = adapter.discover(remote, layout, reader)
+                for rom, save in paired:
+                    add(rom, save)
+                inv.unmatched += unmatched
     return inv
 
 

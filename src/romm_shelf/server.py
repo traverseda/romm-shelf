@@ -20,12 +20,13 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from romm_shelf import bios, mods, sleep
-from romm_shelf.adapters import load_adapters
+from romm_shelf.adapters import DiscReader, load_adapters
 from romm_shelf.auth import Session, load_session
 from romm_shelf.config import Settings
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom, match, scan_local
 from romm_shelf.romm import Rom
+from romm_shelf.sync import inventory
 from romm_shelf.service import SyncResult, rom_for_path, sync_roms
 
 WEB = Path(__file__).parent / "web"
@@ -154,11 +155,13 @@ class Shelf:
     def changed_rom_ids(self) -> list[int]:
         lib = self.library()
         layout = self.layout
-        changed = set()
-        for rom_id, local in lib.local.items():
-            for adapter in self.adapters:
-                if any(s.path.stat().st_mtime > self.synced_until for s in adapter.saves_for(local, layout)):
-                    changed.add(rom_id)
+        # Only installed games can have been played. Their disc headers are read from
+        # disk (no client), so this stays quick inside the sleep inhibitor's delay.
+        matched = [(local, lib.roms[rom_id]) for rom_id, local in lib.local.items()]
+        inv = inventory(matched, self.adapters, layout, remote=[r for _, r in matched],
+                        reader=DiscReader(None, dict(lib.local)))
+        changed = {rom.id for rom, s in inv.saves + inv.states
+                   if s.mtime > self.synced_until}
         return sorted(changed)
 
     @property
@@ -244,12 +247,13 @@ def create_app(settings: Settings | None = None, *, watch_sleep: bool = True) ->
         r = lib.roms[rom_id]
         local = lib.local.get(rom_id)
         files = []
-        if local:
-            for adapter in shelf.adapters:
-                for s in adapter.saves_for(local, shelf.layout):
-                    st = s.path.stat()
-                    files.append({"kind": s.kind, "slot": s.slot, "emulator": s.emulator,
-                                  "name": s.path.name, "size": st.st_size, "modified": st.st_mtime})
+        # Saves of a game that isn't installed count too: Dolphin and Eden find them by game ID.
+        inv = inventory([(local, r)] if local else [], shelf.adapters, shelf.layout, remote=[r],
+                        reader=DiscReader(shelf.client, {r.id: local} if local else {}))
+        for _, s in inv.saves + inv.states:
+            st = s.client_state(r.id)
+            files.append({"kind": s.kind, "slot": s.slot, "emulator": s.emulator,
+                          "name": s.file_name, "size": st.file_size_bytes, "modified": st.updated_at.timestamp()})
         return entry(r, lib) | {
             "summary": r.summary,
             "local_files": files,
