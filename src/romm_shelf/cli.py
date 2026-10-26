@@ -138,7 +138,8 @@ def ui():
             time.sleep(0.25)
         else:
             raise typer.Exit(f"the romm-shelf daemon isn't answering on {url}")
-    profile = Path("~/.local/share/romm-shelf/firefox").expanduser()
+    # Inside Firefox's own Flatpak data folder: the sandbox can't see the rest of home.
+    profile = Path("~/.var/app/org.mozilla.firefox/data/romm-shelf-profile").expanduser()
     profile.mkdir(parents=True, exist_ok=True)
     (profile / "user.js").write_text("".join(f'user_pref("{k}", {v});\n' for k, v in FIREFOX_PREFS.items()))
     os.execvp(FIREFOX[0], [*FIREFOX, "--kiosk", "--no-remote", "--profile", str(profile), url])
