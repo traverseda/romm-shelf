@@ -11,6 +11,7 @@ from loguru import logger
 from romm_shelf.adapters import load_adapters
 from romm_shelf.auth import device_login, load_session, save_credentials
 from romm_shelf.config import Settings
+from romm_shelf.execute import plan_saves, plan_states, run
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import match, scan_local
 from romm_shelf.sync import inventory, negotiate_payload
@@ -86,32 +87,41 @@ def list_roms(
 @app.command()
 def sync(
     rom: Annotated[list[int] | None, typer.Option(help="Limit to these RomM ROM ids")] = None,
+    all_roms: Annotated[bool, typer.Option("--all", help="Every ROM on this device")] = False,
     plan: Annotated[bool, typer.Option("--plan", help="Print the plan; change nothing")] = False,
-    negotiate: Annotated[bool, typer.Option(help="With --plan, ask the server which operations it wants")] = False,
+    offline: Annotated[bool, typer.Option(help="With --plan, print the negotiate request instead of sending it")] = False,
+    states: Annotated[bool, typer.Option(help="Also sync save states")] = True,
+    restore: Annotated[bool, typer.Option(help="Also download server saves missing here (a fresh device)")] = False,
 ):
-    """Sync saves and states. Phase 1 supports --plan only."""
-    if not plan:
-        raise typer.BadParameter("only --plan is implemented so far")
+    """Sync saves (RomM negotiate) and states (design.md § States)."""
+    if not rom and not all_roms:
+        raise typer.BadParameter("name ROMs with --rom, or pass --all")
     settings, session, client, layout = _context()
     adapters = load_adapters()
     m = match(scan_local(layout.roms), client.roms())
-    matched = [(l, r) for l, r in m.matched if not rom or r.id in rom]
+    matched = [(l, r) for l, r in m.matched if all_roms or r.id in rom]
     inv = inventory(matched, adapters, layout)
-    payload = negotiate_payload(inv, adapters, device_id=session.device_id, rom_ids=rom or None)
-
-    typer.echo(f"# {len(inv.saves)} saves, {len(inv.states)} states on device")
-    for r, s in inv.states:
-        typer.echo(f"state  {r.id:>6} {s.slot:8} {s.path}")
-    if not negotiate:
-        typer.echo("# negotiate request (not sent):")
+    rom_ids = sorted({r.id for _, r in matched})
+    payload = negotiate_payload(inv, adapters, device_id=session.device_id, rom_ids=rom_ids)
+    payload.restore_unlisted = restore
+    typer.echo(f"# {len(inv.saves)} saves, {len(inv.states)} states on device for {len(rom_ids)} ROMs")
+    if plan and offline:
         typer.echo(json.dumps(payload.model_dump(mode="json", exclude_none=True), indent=2))
         return
 
     response = client.negotiate(payload)
-    # A plan executes nothing, so close the session the server opened with zero operations.
-    client.complete_session(response.session_id, completed=0, failed=0)
-    typer.echo(f"# server plan (session {response.session_id}, closed unexecuted):")
-    for op in response.operations:
-        typer.echo(f"{op.action:9} {op.rom_id:>6} {op.slot or '-':8} {op.file_name}  ({op.reason})")
-    totals = Counter(op.action for op in response.operations)
-    typer.echo("# " + ", ".join(f"{k}: {v}" for k, v in sorted(totals.items())))
+    steps = plan_saves(response, inv, {r.id: l for l, r in matched}, {a.emulator: a for a in adapters}, layout)
+    if states:
+        server_states = {rid: client.states(rid) for rid in {r.id for r, _ in inv.states}}
+        steps += plan_states(inv, server_states, session.device_id)
+    for step in steps:
+        typer.echo(step.describe())
+    typer.echo("# " + (", ".join(f"{k}: {v}" for k, v in sorted(Counter(s.action for s in steps).items())) or "nothing to do"))
+    if plan:
+        # A plan executes nothing, so close the session the server opened with zero operations.
+        client.complete_session(response.session_id, completed=0, failed=0)
+        return
+    done, failed = run(steps, client, device_id=session.device_id, layout=layout, session_id=response.session_id)
+    typer.echo(f"# done: {done}, failed: {failed}")
+    if failed:
+        raise typer.Exit(1)

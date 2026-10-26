@@ -6,6 +6,7 @@ are ignored. The full spec is in docs/reference/.
 
 from collections.abc import Iterator
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 import httpx
@@ -72,6 +73,16 @@ class NegotiateResponse(_Model):
     operations: list[SyncOperation]
 
 
+class ServerState(_Model):
+    id: int
+    rom_id: int
+    file_name: str
+    emulator: str | None
+    updated_at: datetime
+    file_size_bytes: int
+    labels: list[str] = []
+
+
 class RommError(RuntimeError):
     pass
 
@@ -136,6 +147,54 @@ class RommClient:
     def negotiate(self, payload: NegotiatePayload) -> NegotiateResponse:
         body = payload.model_dump(mode="json", exclude_none=True)
         return NegotiateResponse.model_validate(self._post("/sync/negotiate", body))
+
+    def upload_save(
+        self, rom_id: int, path: Path, *, slot: str | None, emulator: str | None,
+        device_id: str, content_hash: str, session_id: int | None = None,
+    ) -> int:
+        """Upload a save. Refuses (409) to overwrite a newer save in the same slot."""
+        params = {"rom_id": rom_id, "device_id": device_id, "content_hash": content_hash, "overwrite": False}
+        params |= {k: v for k, v in [("slot", slot), ("emulator", emulator), ("session_id", session_id)] if v}
+        with path.open("rb") as f:
+            r = self.http.post("/saves", params=params, files={"saveFile": (path.name, f)})
+        r.raise_for_status()
+        return r.json()["id"]
+
+    def download_save(self, save_id: int, *, device_id: str, session_id: int | None) -> bytes:
+        params = {"device_id": device_id, "optimistic": False}
+        if session_id:
+            params["session_id"] = session_id
+        r = self.http.get(f"/saves/{save_id}/content", params=params)
+        r.raise_for_status()
+        return r.content
+
+    def confirm_download(self, save_id: int, *, device_id: str, content_hash: str) -> None:
+        self._post(f"/saves/{save_id}/downloaded", {"device_id": device_id, "content_hash": content_hash})
+
+    def states(self, rom_id: int) -> list[ServerState]:
+        return [ServerState.model_validate(s) for s in self._get("/states", rom_id=rom_id)]
+
+    def upload_state(self, rom_id: int, path: Path, *, emulator: str) -> ServerState:
+        with path.open("rb") as f:
+            r = self.http.post("/states", params={"rom_id": rom_id, "emulator": emulator},
+                               files={"stateFile": (path.name, f)})
+        r.raise_for_status()
+        return ServerState.model_validate(r.json())
+
+    def replace_state(self, state_id: int, path: Path) -> ServerState:
+        with path.open("rb") as f:
+            r = self.http.put(f"/states/{state_id}", files={"stateFile": (path.name, f)})
+        r.raise_for_status()
+        return ServerState.model_validate(r.json())
+
+    def set_state_labels(self, state_id: int, labels: list[str]) -> None:
+        r = self.http.put(f"/states/{state_id}/labels", json={"labels": labels})
+        r.raise_for_status()
+
+    def download_state(self, state_id: int) -> bytes:
+        r = self.http.get(f"/states/{state_id}/content")
+        r.raise_for_status()
+        return r.content
 
     def complete_session(self, session_id: int, *, completed: int, failed: int) -> None:
         self._post(

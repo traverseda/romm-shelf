@@ -51,6 +51,10 @@ class Adapter(Protocol):
         """Saves and states that exist on disk for this ROM. Never creates or changes files."""
         ...
 
+    def target_path(self, rom: LocalRom, layout: RetroDeckLayout, kind: str, file_name: str) -> Path:
+        """Where a save or state downloaded from RomM goes, when there is no local copy yet."""
+        ...
+
 
 def load_adapters() -> list[Adapter]:
     adapters = []

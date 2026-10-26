@@ -1,0 +1,171 @@
+"""Turning a server's sync answer into steps, and carrying them out.
+
+`plan_*` functions are pure: they decide what to do and touch nothing. `run`
+does it. Every file a download would replace is first copied to a timestamped
+backup folder beside the saves, so no step can lose data.
+"""
+
+import hashlib
+import os
+import shutil
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Literal
+
+from loguru import logger
+
+from romm_shelf.adapters import Adapter, LocalSave
+from romm_shelf.layout import RetroDeckLayout
+from romm_shelf.library import LocalRom
+from romm_shelf.romm import NegotiateResponse, Rom, RommClient, ServerState, SyncOperation
+from romm_shelf.sync import LocalInventory
+
+BACKUP_DIR = ".romm-shelf-backup"
+STATE_LABEL = "romm-shelf:device:{}"
+
+Action = Literal["upload", "download", "archive", "backup-only", "push-state", "pull-state", "flag"]
+
+
+@dataclass(frozen=True)
+class Step:
+    action: Action
+    rom: Rom
+    path: Path
+    reason: str
+    op: SyncOperation | None = None
+    local: LocalSave | None = None
+    server_state: ServerState | None = None
+
+    def describe(self) -> str:
+        return f"{self.action:11} {self.rom.id:>6}  {self.path.name}  ({self.reason})"
+
+
+def plan_saves(
+    response: NegotiateResponse, inv: LocalInventory, locals_by_id: dict[int, LocalRom],
+    adapters: dict[str, Adapter], layout: RetroDeckLayout,
+) -> list[Step]:
+    # RomM pairs saves on (rom_id, slot) and renames files it stores (it appends an
+    # upload timestamp), so the server's file_name never identifies a local file.
+    by_key = {(rom.id, s.slot): (rom, s) for rom, s in inv.saves}
+    roms = {rom.id: rom for rom, _ in inv.saves}
+    steps = []
+    for op in response.operations:
+        hit = by_key.get((op.rom_id, op.slot))
+        if op.action == "no_op":
+            continue
+        if op.action == "upload" and hit:
+            steps.append(Step("upload", hit[0], hit[1].path, op.reason, op, hit[1]))
+        elif op.action == "conflict" and hit:
+            # Keep both: the local copy goes up as an archival (slot-less) save and stays in place.
+            steps.append(Step("archive", hit[0], hit[1].path, "conflict: " + op.reason, op, hit[1]))
+        elif op.action == "download":
+            local = locals_by_id.get(op.rom_id)
+            adapter = adapters.get(op.emulator or "")
+            if hit:
+                path = hit[1].path
+            elif local and adapter:
+                path = adapter.target_path(local, layout, "save", op.file_name)
+            else:
+                logger.warning("no local place for save {} of rom {}", op.file_name, op.rom_id)
+                continue
+            rom = roms.get(op.rom_id) or hit and hit[0]
+            steps.append(Step("download", rom or _stub(op.rom_id), path, op.reason, op))
+        elif op.action == "delete" and hit:
+            # Deleted on the server: move the local copy into the backup folder rather than unlinking it.
+            steps.append(Step("backup-only", hit[0], hit[1].path, op.reason, op, hit[1]))
+    return steps
+
+
+def plan_states(inv: LocalInventory, server: dict[int, list[ServerState]], device_id: str) -> list[Step]:
+    """design.md § States: push our newer states; pull only when nothing is local; flag the rest."""
+    label = STATE_LABEL.format(device_id)
+    steps = []
+    for rom, s in inv.states:
+        mine = [st for st in server.get(rom.id, []) if label in st.labels
+                and st.emulator == s.emulator and st.file_name == s.path.name]
+        mtime = datetime.fromtimestamp(s.path.stat().st_mtime, UTC)
+        if not mine or mtime > mine[0].updated_at:
+            steps.append(Step("push-state", rom, s.path, "local state is newer" if mine else "not on server",
+                              local=s, server_state=mine[0] if mine else None))
+        others = [st for st in server.get(rom.id, []) if label not in st.labels
+                  and st.file_name == s.path.name and st.updated_at > mtime]
+        if others:
+            steps.append(Step("flag", rom, s.path, "a newer state from another device exists",
+                              server_state=max(others, key=lambda st: st.updated_at)))
+    return steps
+
+
+def _stub(rom_id: int) -> Rom:
+    return Rom(id=rom_id, platform_id=0, platform_fs_slug="?", fs_name="?", fs_name_no_ext="?", fs_size_bytes=0)
+
+
+def backup(path: Path, root: Path, stamp: str) -> Path | None:
+    if not path.exists():
+        return None
+    dest = root / BACKUP_DIR / stamp / path.relative_to(root)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, dest)
+    return dest
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.romm-shelf-tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+def run(
+    steps: list[Step], client: RommClient, *, device_id: str, layout: RetroDeckLayout, session_id: int | None,
+) -> tuple[int, int]:
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    done = failed = 0
+    for step in steps:
+        try:
+            _run_one(step, client, device_id, layout, session_id, stamp)
+            done += 1
+            logger.info("ok   {}", step.describe())
+        except Exception as e:  # one bad file must not stop the rest
+            failed += 1
+            logger.error("FAIL {}: {}", step.describe(), e)
+    if session_id is not None:
+        client.complete_session(session_id, completed=done, failed=failed)
+    return done, failed
+
+
+def _root_for(path: Path, layout: RetroDeckLayout) -> Path:
+    return layout.states if path.is_relative_to(layout.states) else layout.saves
+
+
+def _run_one(step: Step, client: RommClient, device_id: str, layout: RetroDeckLayout,
+             session_id: int | None, stamp: str) -> None:
+    md5 = lambda p: hashlib.md5(p.read_bytes()).hexdigest()  # noqa: E731
+    match step.action:
+        case "upload":
+            client.upload_save(step.rom.id, step.path, slot=step.local.slot, emulator=step.local.emulator,
+                               device_id=device_id, content_hash=md5(step.path), session_id=session_id)
+        case "archive":
+            client.upload_save(step.rom.id, step.path, slot=None, emulator=step.local.emulator,
+                               device_id=device_id, content_hash=md5(step.path), session_id=session_id)
+        case "download":
+            data = client.download_save(step.op.save_id, device_id=device_id, session_id=session_id)
+            backup(step.path, _root_for(step.path, layout), stamp)
+            _write_atomic(step.path, data)
+            client.confirm_download(step.op.save_id, device_id=device_id,
+                                    content_hash=hashlib.md5(data).hexdigest())
+        case "backup-only":
+            backup(step.path, _root_for(step.path, layout), stamp)
+            step.path.unlink()
+        case "push-state":
+            if step.server_state:
+                client.replace_state(step.server_state.id, step.path)
+            else:
+                st = client.upload_state(step.rom.id, step.path, emulator=step.local.emulator)
+                client.set_state_labels(st.id, [*st.labels, STATE_LABEL.format(device_id)])
+        case "pull-state":
+            data = client.download_state(step.server_state.id)
+            backup(step.path, _root_for(step.path, layout), stamp)
+            _write_atomic(step.path, data)
+        case "flag":
+            pass  # surfaced to the user; nothing to execute

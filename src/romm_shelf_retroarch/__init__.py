@@ -47,6 +47,20 @@ class RetroArchAdapter:
             return []
         return sorted(p for p in folder.iterdir() if p.is_file() and p.name.startswith(stem + "."))
 
+    def target_path(self, rom: LocalRom, layout: RetroDeckLayout, kind: str, file_name: str) -> Path:
+        """The name RetroArch will look for, built from the ROM, never from the server's file name.
+
+        RomM stores "Game [2026-10-26_15-09-31].srm"; RetroArch only reads "Game.srm".
+        Only the extension is taken from the server's name.
+        """
+        base = layout.saves if kind == "save" else layout.states
+        folder = rom.name if rom.path.is_dir() else rom.system
+        stem = rom.name if rom.path.is_dir() else rom.path.stem
+        if kind == "save":
+            return base / folder / (stem + (Path(file_name).suffix or ".srm"))
+        slot = STATE_RE.search(file_name)
+        return base / folder / (stem + (slot.group(0) if slot else ".state.auto"))
+
     def saves_for(self, rom: LocalRom, layout: RetroDeckLayout) -> list[LocalSave]:
         stem = rom.path.stem
         found = []
