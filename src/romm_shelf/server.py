@@ -5,8 +5,10 @@ CLI action with a different front end (design.md § Parity). The library is
 recomputed on start and on /api/refresh; nothing is written to disk.
 """
 
+import itertools
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +32,11 @@ from romm_shelf.service import SyncResult, rom_for_path, sync_roms
 WEB = Path(__file__).parent / "web"
 
 
+def _step_progress(job: dict, result: SyncResult, step, error: str | None) -> None:
+    job.update(done=result.done + result.failed, total=len(result.steps), current=step.describe())
+    job["log"].append({"step": step.describe(), "error": error})
+
+
 @dataclass
 class Library:
     roms: dict[int, Rom]
@@ -49,7 +56,35 @@ class Shelf:
         # memory only: losing it on restart means the next sleep sync is smaller,
         # never that anything is lost (the next game-end or manual sync catches up).
         self.synced_until = time.time()
-        self.jobs: dict[int, dict] = {}  # in-memory progress for the UI; not state anyone relies on
+        # Recent work (installs, syncs, BIOS downloads) for the UI's Activity view.
+        # In memory only, newest first; nothing relies on it.
+        self.activity: deque[dict] = deque(maxlen=50)
+        self._job_ids = itertools.count(1)
+
+    def start_job(self, kind: str, title: str, *, rom_id: int | None = None, unit: str = "steps",
+                  total: int = 0) -> dict:
+        job = {"id": next(self._job_ids), "kind": kind, "title": title, "rom_id": rom_id, "status": "running",
+               "unit": unit, "done": 0, "total": total, "current": None, "error": None, "log": [],
+               "started": time.time(), "ended": None}
+        self.activity.appendleft(job)
+        return job
+
+    @staticmethod
+    def end_job(job: dict, error: str | None = None) -> None:
+        failed = error or any(entry["error"] for entry in job["log"])
+        job.update(status="failed" if failed else "done", error=error, current=None, ended=time.time())
+
+    def running(self, kind: str, rom_id: int) -> dict | None:
+        return next((j for j in self.activity if j["kind"] == kind and j["rom_id"] == rom_id
+                     and j["status"] == "running"), None)
+
+    def _names(self, rom_ids: list[int] | None) -> str:
+        if rom_ids is None:
+            return "all games"
+        if len(rom_ids) > 2:
+            return f"{len(rom_ids)} games"
+        roms = self.library().roms
+        return ", ".join(roms[i].name or roms[i].fs_name_no_ext if i in roms else str(i) for i in rom_ids)
 
     def rom_for_path(self, path: str) -> Rom | None:
         for refresh in (False, True):  # a game downloaded since the last refresh
@@ -61,8 +96,18 @@ class Shelf:
 
     def sync(self, rom_ids: list[int] | None, why: str) -> SyncResult:
         started = time.time()
-        result = sync_roms(self.session, self.client, self.layout, self.adapters, rom_ids,
-                           remote=list(self.library().roms.values()))
+        job = self.start_job("sync", f"{why}: {self._names(rom_ids)}",
+                             rom_id=rom_ids[0] if rom_ids and len(rom_ids) == 1 else None)
+        job["current"] = "checking RomM"
+        try:
+            result = sync_roms(self.session, self.client, self.layout, self.adapters, rom_ids,
+                               remote=list(self.library().roms.values()),
+                               progress=lambda r, step, error: _step_progress(job, r, step, error))
+        except Exception as e:
+            self.end_job(job, str(e))
+            raise
+        job["total"] = len(result.steps)
+        self.end_job(job)
         self.synced_until = max(self.synced_until, started)
         logger.info("{} sync of {}: {} steps, {} done, {} failed", why, rom_ids or "all",
                     len(result.steps), result.done, result.failed)
@@ -76,21 +121,22 @@ class Shelf:
                 self._library.local = {r.id: l for l, r in m.matched}
                 self._library.local_only = m.local_only
 
-    def install(self, rom_id: int) -> None:
+    def install(self, rom_id: int, job: dict) -> None:
         rom = self.library().roms[rom_id]
-        job = self.jobs[rom_id] = {"rom_id": rom_id, "action": "install", "done": 0,
-                                   "total": rom.fs_size_bytes, "status": "running", "error": None}
         try:
             plan = shelf_ops.install_plan(rom, self.layout)
+            job["current"] = f"downloading {plan.target.name}"
             shelf_ops.install(plan, self.client, lambda d, t: job.update(done=d, total=t))
             self.rescan_local()
             # Pull any saves and states RomM has for it, so the first launch picks up where you left off.
+            job["current"] = "restoring saves"
             sync_roms(self.session, self.client, self.layout, self.adapters, [rom_id], restore=True,
-                      remote=list(self.library().roms.values()))
-            job["status"] = "done"
+                      remote=list(self.library().roms.values()),
+                      progress=lambda r, step, error: job["log"].append({"step": step.describe(), "error": error}))
+            self.end_job(job)
         except Exception as e:
             logger.exception("install of {} failed", rom_id)
-            job.update(status="failed", error=str(e))
+            self.end_job(job, str(e))
 
     def uninstall(self, rom_id: int) -> dict:
         lib = self.library()
@@ -218,18 +264,21 @@ def create_app(settings: Settings | None = None, *, watch_sleep: bool = True) ->
             raise HTTPException(404)
         if rom_id in lib.local:
             raise HTTPException(409, "already on this device")
-        if shelf.jobs.get(rom_id, {}).get("status") == "running":
-            return shelf.jobs[rom_id]
-        threading.Thread(target=shelf.install, args=(rom_id,), daemon=True).start()
-        return {"rom_id": rom_id, "status": "running"}
+        if job := shelf.running("install", rom_id):
+            return job
+        r = lib.roms[rom_id]
+        job = shelf.start_job("install", r.name or r.fs_name_no_ext, rom_id=rom_id, unit="bytes",
+                              total=r.fs_size_bytes)
+        threading.Thread(target=shelf.install, args=(rom_id, job), daemon=True).start()
+        return job
 
     @app.post("/api/rom/{rom_id}/uninstall")
     def uninstall(rom_id: int):
         return shelf.uninstall(rom_id)
 
-    @app.get("/api/jobs")
-    def jobs():
-        return list(shelf.jobs.values())
+    @app.get("/api/activity")
+    def activity():
+        return list(shelf.activity)
 
     # BIOS (design.md § BIOS): the same status/get/rm as `romm-shelf bios`.
     def bios_status(system: str | None = None) -> list[bios.BiosStatus]:
@@ -264,13 +313,20 @@ def create_app(settings: Settings | None = None, *, watch_sleep: bool = True) ->
         todo = [s for s in bios_status(system) if bios.gettable(s, layout)
                 and (filename is None or s.entry.filename == filename)]
         ok, failed = [], []
+        job = shelf.start_job("bios", f"BIOS: {filename or system}", total=len(todo))
         for s in todo:
+            job["current"] = f"downloading {s.entry.filename}"
+            error = None
             try:
                 bios.download(s, shelf.client, layout)
                 ok.append(s.entry.filename)
             except Exception as e:  # report per file; one bad copy must not stop the rest
                 logger.error("bios get {}: {}", s.entry.filename, e)
-                failed.append({"filename": s.entry.filename, "error": str(e)})
+                error = str(e)
+                failed.append({"filename": s.entry.filename, "error": error})
+            job["done"] += 1
+            job["log"].append({"step": f"get {s.entry.system} {s.entry.filename}", "error": error})
+        shelf.end_job(job)
         return {"downloaded": ok, "failed": failed}
 
     @app.post("/api/bios/rm")

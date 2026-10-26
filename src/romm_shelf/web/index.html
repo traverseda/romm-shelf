@@ -19,7 +19,9 @@
     .badge { position: absolute; top: 6px; right: 6px; }
     .hint { position: fixed; bottom: 0; left: 0; right: 0; padding: 6px 16px; background: #0c0d11; font-size: 13px; color: #9aa; }
     .detail { background: #1c1f28; color: #e8e8ee; width: 720px; max-width: 95vw; }
-    .bios { padding: 8px 16px 48px; max-width: 1000px; }
+    .bios { padding: 8px 16px 96px; max-width: 1000px; }
+    .strip { position: fixed; bottom: 30px; left: 0; right: 0; padding: 6px 16px; background: #1a2333;
+             font-size: 13px; z-index: 20; }
     .bios-row { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-radius: 8px;
                 background: #1c1f28; margin-bottom: 4px; cursor: pointer; }
     .bios-badge { min-width: 110px; justify-content: center; }
@@ -32,11 +34,36 @@
          tabindex="0" data-nav @click="platform = p.slug">
       {{ p.slug }} <span class="text-grey-5">{{ p.on_device }}/{{ p.total }}</span>
     </div>
+    <div class="tab" :class="{active: platform === ACTIVITY}" tabindex="0" data-nav @click="platform = ACTIVITY">
+      Activity <q-spinner v-if="runningJobs.length" size="14px"></q-spinner></div>
     <div class="tab" :class="{active: platform === BIOS}" tabindex="0" data-nav @click="platform = BIOS">BIOS</div>
   </div>
 
   <div v-if="loading" class="q-pa-xl text-center"><q-spinner size="48px"></q-spinner><div>Loading library…</div></div>
   <div v-else-if="error" class="q-pa-xl text-negative">{{ error }}</div>
+  <div v-else-if="platform === ACTIVITY" class="bios" data-nav-group="grid" data-nav-up="tabs">
+    <div v-if="!activity.length" class="q-pa-md text-grey-5">
+      Nothing yet. Installs, syncs (game start/end, sleep, uninstall) and BIOS downloads show up here.
+    </div>
+    <div v-for="j in activity" :key="j.id" class="q-mb-xs">
+      <div class="bios-row" tabindex="0" data-nav @click="openJob[j.id] = !openJob[j.id]">
+        <q-badge :color="jobColor(j)" class="bios-badge">{{ j.kind }} · {{ j.status }}</q-badge>
+        <div class="col">
+          <div>{{ j.title }}</div>
+          <div class="text-grey-6" style="font-size:12px">{{ jobDetail(j) }}</div>
+          <q-linear-progress v-if="j.status === 'running' && j.total" class="q-mt-xs" rounded size="6px"
+                             :value="j.done / j.total"></q-linear-progress>
+        </div>
+        <div class="text-grey-5" style="white-space:nowrap">{{ ago(j.started) }}</div>
+      </div>
+      <div v-if="openJob[j.id]" class="q-px-md q-pb-sm text-grey-5" style="font-size:12px;font-family:monospace">
+        <div v-if="!j.log.length">No files changed.</div>
+        <div v-for="(l, i) in j.log" :key="i" :class="{ 'text-negative': l.error }">
+          {{ l.error ? "FAIL" : "ok" }} {{ l.step }}<span v-if="l.error">: {{ l.error }}</span></div>
+        <div v-if="j.error" class="text-negative">{{ j.error }}</div>
+      </div>
+    </div>
+  </div>
   <div v-else-if="platform === BIOS" class="bios" data-nav-group="grid" data-nav-up="tabs">
     <div v-if="biosLoading" class="q-pa-xl text-center"><q-spinner size="48px"></q-spinner><div>Checking BIOS files…</div></div>
     <div v-if="biosMessage" class="q-pa-sm text-grey-4">{{ biosMessage }}</div>
@@ -120,6 +147,13 @@
     </q-card>
   </q-dialog>
 
+  <div v-if="runningJobs.length" class="strip">
+    <div v-for="j in runningJobs" :key="j.id" class="row items-center no-wrap q-gutter-sm">
+      <q-spinner size="14px"></q-spinner>
+      <div class="ellipsis">{{ j.title }} <span class="text-grey-5">· {{ jobDetail(j) }}</span></div>
+      <q-linear-progress v-if="j.total" class="col" rounded size="6px" :value="j.done / j.total"></q-linear-progress>
+    </div>
+  </div>
   <div class="hint">↕↔ move · A open · B back · LB/RB platform · Y refresh &nbsp;&nbsp;|&nbsp; keys: arrows · Enter · Esc · Q/E · R</div>
 </div>
 
@@ -135,19 +169,43 @@ const app = createApp({
     const platform = ref(null);
     const loading = ref(true), error = ref(null);
     const detail = ref(null), detailOpen = ref(false);
-    const jobs = ref({}), message = ref(null), busy = ref(false), confirmRemove = ref(false);
-    const job = computed(() => detail.value && jobs.value[detail.value.id]);
-    let lastFocus = null, polling = null;
+    const message = ref(null), busy = ref(false), confirmRemove = ref(false);
+    let lastFocus = null;
 
-    async function pollJobs() {
-      const list = await (await fetch("/api/jobs")).json();
-      const before = jobs.value;
-      jobs.value = Object.fromEntries(list.map((j) => [j.rom_id, j]));
-      const finished = list.some((j) => j.status === "done" && before[j.rom_id]?.status === "running");
-      if (finished) await reload();
-      if (!list.some((j) => j.status === "running")) { clearInterval(polling); polling = null; }
+    // Activity: everything the daemon is doing or did lately, whoever started it
+    // (this UI, an ES-DE hook, sleep). Polled always: fast while something runs.
+    const ACTIVITY = "__activity";
+    const activity = ref([]), openJob = ref({});
+    const runningJobs = computed(() => activity.value.filter((j) => j.status === "running"));
+    const jobs = computed(() => {  // latest install per game, for the grid badges and the game page
+      const m = {};
+      for (const j of activity.value) if (j.kind === "install" && !(j.rom_id in m)) m[j.rom_id] = j;
+      return m;
+    });
+    const job = computed(() => detail.value && jobs.value[detail.value.id]);
+    let pollTimer = null;
+    async function pollActivity() {
+      clearTimeout(pollTimer);
+      try {
+        const before = Object.fromEntries(activity.value.map((j) => [j.id, j.status]));
+        activity.value = await (await fetch("/api/activity")).json();
+        // A finished install or sync changes badges and save lists.
+        if (activity.value.some((j) => j.status !== "running" && before[j.id] === "running")) await reload();
+      } catch (e) { /* daemon restarting; try again */ }
+      pollTimer = setTimeout(pollActivity, runningJobs.value.length ? 500 : 3000);
     }
-    function watchJobs() { if (!polling) polling = setInterval(pollJobs, 500); pollJobs(); }
+    const watchJobs = pollActivity;
+    const jobColor = (j) => ({ running: "primary", done: "positive", failed: "negative" })[j.status];
+    function jobDetail(j) {
+      const amount = j.unit === "bytes" ? `${size(j.done)} of ${size(j.total)}`
+        : j.total ? `${j.done} of ${j.total} files` : j.status === "running" ? "" : "nothing to do";
+      const failed = j.log.filter((l) => l.error).length;
+      return [j.current, amount, failed && `${failed} failed`, j.error].filter(Boolean).join(" · ");
+    }
+    function ago(t) {
+      const s = Math.max(0, Date.now() / 1000 - t);
+      return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)} min ago` : new Date(t * 1000).toLocaleTimeString();
+    }
 
     async function reload() {  // re-read the library (status badges) and the open game's details
       lib.value = await (await fetch("/api/library")).json();
@@ -229,7 +287,7 @@ const app = createApp({
     Vue.watch(() => platform.value, (p) => { confirmBios.value = null; if (p === BIOS && !bios.value.length) loadBios(); });
 
     const platforms = computed(() => lib.value.platforms);
-    const tabs = computed(() => [...platforms.value.map((p) => p.slug), BIOS]);
+    const tabs = computed(() => [...platforms.value.map((p) => p.slug), ACTIVITY, BIOS]);
     const shown = computed(() => lib.value.roms.filter((r) => r.platform === platform.value));
 
     async function load(refresh = false) {
@@ -239,7 +297,7 @@ const app = createApp({
         if (!res.ok) throw new Error(`library: HTTP ${res.status}`);
         lib.value = await res.json();
         const withGames = lib.value.platforms.find((p) => p.on_device) || lib.value.platforms[0];
-        if (platform.value !== BIOS && !lib.value.platforms.some((p) => p.slug === platform.value)) platform.value = withGames?.slug;
+        if (![BIOS, ACTIVITY].includes(platform.value) && !lib.value.platforms.some((p) => p.slug === platform.value)) platform.value = withGames?.slug;
       } catch (e) { error.value = String(e); }
       loading.value = false;
       await nextTick(); focusFirst();
@@ -266,7 +324,7 @@ const app = createApp({
     window.addEventListener("nav-back", () => { detailOpen.value = false; });
     window.addEventListener("nav-refresh", () => {
       if (detailOpen.value) return;
-      platform.value === BIOS ? loadBios() : load(true);
+      platform.value === BIOS ? loadBios() : platform.value === ACTIVITY ? pollActivity() : load(true);
     });
 
     const size = (b) => b > 1 << 30 ? `${(b / (1 << 30)).toFixed(1)} GB` : b > 1 << 20 ? `${(b / (1 << 20)).toFixed(1)} MB` : `${Math.ceil(b / 1024)} KB`;
@@ -277,7 +335,8 @@ const app = createApp({
     return { platforms, platform, shown, loading, error, detail, detailOpen, open, restoreFocus, size, when,
              jobs, job, message, busy, confirmRemove, install, uninstall, pct,
              BIOS, bios, biosLoading, biosBusy, biosMessage, confirmBios, biosGet, biosAct, gettable, summary, badge,
-             expanded, unavailable, visible };
+             expanded, unavailable, visible,
+             ACTIVITY, activity, openJob, runningJobs, jobColor, jobDetail, ago };
   },
 });
 app.use(Quasar, { config: { dark: true } });

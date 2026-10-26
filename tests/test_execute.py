@@ -132,3 +132,18 @@ def test_states_skip_when_our_copy_is_current(layout, remote):
     server = {1390: [_state(1, [STATE_LABEL.format("me")], future),
                      _state(2, [STATE_LABEL.format("me")], future, "from_below_2020_09_16_v_1_0_0.state3")]}
     assert plan_states(inv, server, "me") == []
+
+
+def test_run_reports_each_step(layout, remote):
+    inv, locals_, adapters = _setup(layout, remote)
+    steps = plan_saves(_resp(_op("download", 1006, WIZ, save_id=9), _op("upload", 1006, WIZ)),
+                       inv, locals_, adapters, layout)
+
+    class Client(FakeClient):
+        def upload_save(self, *a, **kw):
+            raise RuntimeError("server said no")
+
+    seen = []
+    assert run(steps, Client(), device_id="d", layout=layout, session_id=7,
+               on_step=lambda s, err: seen.append((s.action, err))) == (1, 1)
+    assert seen == [("download", None), ("upload", "server said no")]

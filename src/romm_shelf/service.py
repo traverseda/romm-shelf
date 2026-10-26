@@ -1,5 +1,6 @@
 """One sync entry point shared by the CLI, the ES-DE hooks and the UI (design.md § Parity)."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
@@ -40,9 +41,12 @@ def rom_for_path(path: str | Path, layout: RetroDeckLayout, matched: list[tuple[
 def sync_roms(
     session: Session, client: RommClient, layout: RetroDeckLayout, adapters: list[Adapter],
     rom_ids: list[int] | None, *, plan_only: bool = False, restore: bool = False, states: bool = True,
-    remote: list[Rom] | None = None,
+    remote: list[Rom] | None = None, progress: Callable[[SyncResult, Step, str | None], None] | None = None,
 ) -> SyncResult:
-    """Sync saves and states for some ROMs (None means every ROM on the device)."""
+    """Sync saves and states for some ROMs (None means every ROM on the device).
+
+    progress(result, step, error) is called after each step; result.steps holds the whole plan.
+    """
     with SYNC_LOCK:
         m = match(scan_local(layout.roms), remote if remote is not None else client.roms())
         matched = [(l, r) for l, r in m.matched if rom_ids is None or r.id in rom_ids]
@@ -80,8 +84,14 @@ def sync_roms(
             return result
         # States are outside RomM's sync sessions; they run with the last batch.
         sessions[-1][1].extend(state_steps)
+        def on_step(step: Step, error: str | None) -> None:
+            if error:
+                result.failed += 1
+            else:
+                result.done += 1
+            if progress:
+                progress(result, step, error)
+
         for session_id, steps in sessions:
-            done, failed = run(steps, client, device_id=session.device_id, layout=layout, session_id=session_id)
-            result.done += done
-            result.failed += failed
+            run(steps, client, device_id=session.device_id, layout=layout, session_id=session_id, on_step=on_step)
         return result

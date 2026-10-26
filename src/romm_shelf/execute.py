@@ -8,6 +8,7 @@ backup folder beside the saves, so no step can lose data.
 import hashlib
 import os
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -133,17 +134,23 @@ def _write_atomic(path: Path, data: bytes) -> None:
 
 def run(
     steps: list[Step], client: RommClient, *, device_id: str, layout: RetroDeckLayout, session_id: int | None,
+    on_step: Callable[[Step, str | None], None] | None = None,
 ) -> tuple[int, int]:
+    """Carry out steps. on_step(step, error) is called after each one (error None on success)."""
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     done = failed = 0
     for step in steps:
+        error = None
         try:
             _run_one(step, client, device_id, layout, session_id, stamp)
             done += 1
             logger.info("ok   {}", step.describe())
         except Exception as e:  # one bad file must not stop the rest
             failed += 1
+            error = str(e)
             logger.error("FAIL {}: {}", step.describe(), e)
+        if on_step:
+            on_step(step, error)
     if session_id is not None:
         client.complete_session(session_id, completed=done, failed=failed)
     return done, failed
