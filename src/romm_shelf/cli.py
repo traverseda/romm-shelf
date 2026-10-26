@@ -85,6 +85,18 @@ def list_roms(
 
 
 @app.command()
+def serve(
+    port: Annotated[int, typer.Option(help="Port on 127.0.0.1")] = 8765,
+):
+    """Run the local daemon: the UI and its API, on 127.0.0.1 only."""
+    import uvicorn
+
+    from romm_shelf.server import create_app
+
+    uvicorn.run(create_app(), host="127.0.0.1", port=port, log_level="info")
+
+
+@app.command()
 def sync(
     rom: Annotated[list[int] | None, typer.Option(help="Limit to these RomM ROM ids")] = None,
     all_roms: Annotated[bool, typer.Option("--all", help="Every ROM on this device")] = False,

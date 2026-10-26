@@ -36,6 +36,9 @@ class Rom(_Model):
     fs_size_bytes: int
     name: str | None = None
     md5_hash: str | None = None
+    summary: str | None = None
+    path_cover_small: str | None = None
+    path_cover_large: str | None = None
 
 
 class ClientSaveState(_Model):
@@ -170,6 +173,16 @@ class RommClient:
 
     def confirm_download(self, save_id: int, *, device_id: str, content_hash: str) -> None:
         self._post(f"/saves/{save_id}/downloaded", {"device_id": device_id, "content_hash": content_hash})
+
+    def saves(self, rom_id: int) -> list[dict]:
+        return self._get("/saves", rom_id=rom_id)
+
+    def asset(self, path: str) -> httpx.Response:
+        """A file under RomM's /assets (covers, screenshots), fetched with our credentials."""
+        root = str(self.http.base_url).removesuffix("/api/").removesuffix("/api")
+        r = self.http.get(root + path)
+        r.raise_for_status()
+        return r
 
     def states(self, rom_id: int) -> list[ServerState]:
         return [ServerState.model_validate(s) for s in self._get("/states", rom_id=rom_id)]

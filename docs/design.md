@@ -322,10 +322,24 @@ romm-shelf ui
    - The only RetroArch-style files it doesn't attribute are orphans (see
      todo.md) and a romhack that isn't in RomM.
    - The device-flow `login` is written but hasn't been run against a server yet.
-2. **RetroArch sync, for real.** Push and pull with backups, ES-DE hooks, and the
+2. **RetroArch sync, for real.**
+   *Status, 2026-10-26:*
+   - Done on the Deck: save upload, labelled state push, and a no-op on re-run,
+     all for Wizardry (rom 1006).
+   - Restore was found broken, because RomM renames stored saves; it's fixed and
+     unit-tested, but not yet re-run on the Deck.
+   - The ES-DE hooks and the shutdown unit are not started.
+
+   The rest of phase 2: Push and pull with backups, ES-DE hooks, and the
    shutdown unit. This covers most of the test library (nes, snes, n64, gba, and
    most psx).
 3. **Shelf UI.** Library, game page, downloads, and pairing.
+   *Status, 2026-10-26:* a read-only slice is done (`romm-shelf serve`).
+   - Platform tabs, a cover grid with on-device badges, and a game page with
+     local and server save status.
+   - Keyboard navigation is tested headless with Playwright: tabs, grid, opening
+     a dialog, and focus returning on close.
+   - Not yet tested on the Deck: the gamepad path and the Game Mode window.
 4. **More adapters.** Dolphin GC and Wii, title-ID-directory emulators, then
    shared memory cards.
 
