@@ -221,7 +221,11 @@ still on the server, or in the local backup folder.
   That keeps path matching trivially true for anything downloaded through
   romm-shelf.
 - Multi-file ROMs (folders, `.cue`/`.bin`, multi-disc games) are downloaded as
-  folders and keep RomM's layout.
+  folders and keep RomM's layout. RomM flags a folder whose only top-level entry
+  is one file as `has_nested_single_file`, not `has_multiple_files`. It sends that
+  one file as is, but zips the folder when files sit below it (a mod package).
+  romm-shelf goes by the name RomM sends: `<folder>.zip` is unpacked, anything
+  else is put inside the folder.
 - **Removing a game** deletes the ROM. It keeps the saves by default and offers to
   push them first.
 - **Firmware/BIOS:** the user's own firmware uploaded to RomM can be downloaded

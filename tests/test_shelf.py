@@ -8,8 +8,8 @@ from tests.conftest import rom
 
 
 class FakeClient:
-    def __init__(self, payload: bytes, fail: bool = False):
-        self.payload, self.fail = payload, fail
+    def __init__(self, payload: bytes, fail: bool = False, sent: str | None = None):
+        self.payload, self.fail, self.sent = payload, fail, sent
 
     def download_rom(self, r, out, progress=None):
         out.write(self.payload[:3])
@@ -18,6 +18,7 @@ class FakeClient:
         out.write(self.payload[3:])
         if progress:
             progress(len(self.payload), len(self.payload))
+        return self.sent
 
 
 def test_single_file_install_and_uninstall(layout):
@@ -59,6 +60,21 @@ def test_multi_file_zip_wrapped_in_game_folder(layout):
     plan = shelf.install_plan(r, layout)
     shelf.install(plan, FakeClient(_zip({"Mega Man Legends 2/disc.cue": b"cue"})))
     assert [p.name for p in plan.target.iterdir()] == ["disc.cue"]
+
+
+def test_folder_with_one_file_is_sent_as_that_file(layout):
+    r = rom(1045, "psx", "Gran Turismo 2").model_copy(update={"has_nested_single_file": True})
+    plan = shelf.install_plan(r, layout)
+    shelf.install(plan, FakeClient(b"chd bytes", sent="Gran Turismo 2.chd"))
+    assert (plan.target / "Gran Turismo 2.chd").read_bytes() == b"chd bytes"
+    assert not list(plan.target.parent.glob(".*"))
+
+
+def test_nested_folder_sent_as_zip(layout):
+    r = rom(1366, "psx", "Mod").model_copy(update={"has_nested_single_file": True})
+    plan = shelf.install_plan(r, layout)
+    shelf.install(plan, FakeClient(_zip({"Mod/Mod.json": b"{}", "Mod/sub/a.bin": b"a"}), sent="Mod.zip"))
+    assert (plan.target / "sub/a.bin").exists()
 
 
 def test_unsafe_zip_refused(layout):

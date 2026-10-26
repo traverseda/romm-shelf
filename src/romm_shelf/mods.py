@@ -306,7 +306,7 @@ def uninstall(removed: list[Path]) -> None:
 
 def plan_install(rom: Rom, client: RommClient, layout: RetroDeckLayout,
                  remote: list[Rom]) -> shelf.InstallPlan | ModInstallPlan:
-    if rom.has_multiple_files and rom.platform_fs_slug in SYSTEMS:
+    if rom.is_folder and rom.platform_fs_slug in SYSTEMS:
         text = client.rom_file(rom.id, descriptor_name(rom))
         if text is not None and parse(Path(descriptor_name(rom)), text):
             return install_plan(rom, text, layout, remote)

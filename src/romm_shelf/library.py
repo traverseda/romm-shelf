@@ -58,7 +58,7 @@ def match(local: Iterable[LocalRom], remote: Iterable[Rom]) -> Match:
         key = (rom.system, rom.name)
         # A Dolphin mod: roms/wii/X.json is installed from the RomM folder X (design.md § Mods).
         mod = (rom.system, rom.path.stem)
-        if key not in by_path and rom.path.suffix == ".json" and mod in by_path and by_path[mod].has_multiple_files:
+        if key not in by_path and rom.path.suffix == ".json" and mod in by_path and by_path[mod].is_folder:
             key = mod
         if key in by_path:
             result.matched.append((rom, by_path[key]))

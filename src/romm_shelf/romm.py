@@ -4,10 +4,12 @@ Models list only the fields romm-shelf reads; RomM sends many more and they
 are ignored. The full spec is in docs/reference/.
 """
 
+import re
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
+from urllib.parse import unquote
 
 import httpx
 from pydantic import BaseModel, ConfigDict
@@ -38,8 +40,15 @@ class Rom(_Model):
     md5_hash: str | None = None
     summary: str | None = None
     has_multiple_files: bool = False
+    has_nested_single_file: bool = False
+    """A folder whose only top-level entry is one file; deeper files may sit below it."""
     path_cover_small: str | None = None
     path_cover_large: str | None = None
+
+    @property
+    def is_folder(self) -> bool:
+        """Installed as a folder roms/<system>/<fs_name>/, not a single file."""
+        return self.has_multiple_files or self.has_nested_single_file
 
 
 class ClientSaveState(_Model):
@@ -85,6 +94,14 @@ class ServerState(_Model):
     updated_at: datetime
     file_size_bytes: int
     labels: list[str] = []
+
+
+def _attachment_name(header: str) -> str | None:
+    if m := re.search(r"filename\*=UTF-8''([^;]+)", header):
+        return unquote(m.group(1))
+    if m := re.search(r'filename="([^"]+)"', header):
+        return unquote(m.group(1))
+    return None
 
 
 class RommError(RuntimeError):
@@ -175,11 +192,16 @@ class RommClient:
     def confirm_download(self, save_id: int, *, device_id: str, content_hash: str) -> None:
         self._post(f"/saves/{save_id}/downloaded", {"device_id": device_id, "content_hash": content_hash})
 
-    def download_rom(self, rom: "Rom", out, progress=None) -> None:
-        """Stream a ROM: the file itself, or a zip of all its files for multi-file ROMs."""
+    def download_rom(self, rom: "Rom", out, progress=None) -> str | None:
+        """Stream a ROM and return the file name RomM sent.
+
+        RomM sends a folder ROM as <fs_name>.zip, except a folder holding a single
+        file, which it sends as that file.
+        """
         name = rom.fs_name + (".zip" if rom.has_multiple_files else "")
         with self.http.stream("GET", f"/roms/{rom.id}/content/{name}", timeout=None) as r:
             r.raise_for_status()
+            sent = _attachment_name(r.headers.get("content-disposition", ""))
             total = int(r.headers.get("content-length") or rom.fs_size_bytes)
             done = 0
             for chunk in r.iter_bytes(1 << 20):
@@ -187,6 +209,7 @@ class RommClient:
                 done += len(chunk)
                 if progress:
                     progress(done, total)
+        return sent
 
     def rom_file(self, rom_id: int, file_name: str) -> str | None:
         """One top-level file of a multi-file ROM, as text; None when the ROM has no such file."""

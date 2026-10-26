@@ -58,6 +58,7 @@ class FakeClient:
         out.write(self.contents[rom.id])
         if progress:
             progress(len(self.contents[rom.id]), len(self.contents[rom.id]))
+        return f"{rom.fs_name}.zip" if rom.is_folder else rom.fs_name
 
     def rom_file(self, rom_id, file_name):
         with zipfile.ZipFile(io.BytesIO(self.contents[rom_id])) as z:
@@ -67,7 +68,7 @@ class FakeClient:
 
 def mod_rom(size: int = 10) -> Rom:
     return Rom(id=1371, platform_id=1, platform_fs_slug="wii", fs_name="Mario Kart Throwback",
-               fs_name_no_ext="Mario Kart Throwback", fs_size_bytes=size, has_multiple_files=True)
+               fs_name_no_ext="Mario Kart Throwback", fs_size_bytes=size, has_nested_single_file=True)
 
 
 def base_rom() -> Rom:

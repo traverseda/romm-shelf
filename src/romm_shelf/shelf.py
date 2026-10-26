@@ -25,7 +25,7 @@ class InstallPlan:
     target: Path
     size: int
     multi: bool
-    """Multi-file ROMs arrive as one zip and are unpacked into the target folder."""
+    """Installed as a folder: from a zip of it, or from the one file it holds."""
 
     def describe(self) -> str:
         kind = "folder" if self.multi else "file"
@@ -39,7 +39,7 @@ def install_plan(rom: Rom, layout: RetroDeckLayout) -> InstallPlan:
     free = shutil.disk_usage(layout.roms).free
     if free < rom.fs_size_bytes * 1.1:
         raise OSError(f"not enough space: need {rom.fs_size_bytes / 2**30:.2f} GB, have {free / 2**30:.2f} GB")
-    return InstallPlan(rom, target, rom.fs_size_bytes, rom.has_multiple_files)
+    return InstallPlan(rom, target, rom.fs_size_bytes, rom.is_folder)
 
 
 def install(plan: InstallPlan, client: RommClient, progress: Progress | None = None) -> Path:
@@ -48,14 +48,20 @@ def install(plan: InstallPlan, client: RommClient, progress: Progress | None = N
     part = target.with_name(f".{target.name}.romm-shelf-part")
     try:
         with part.open("wb") as f:
-            client.download_rom(plan.rom, f, progress)
+            sent = client.download_rom(plan.rom, f, progress)
         if plan.multi:
             staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
             try:
-                unpack(part, staging, target.name).rename(target)
+                if sent == f"{target.name}.zip" or (sent is None and plan.rom.has_multiple_files):
+                    unpack(part, staging, target.name).rename(target)
+                else:  # a folder holding one file, sent as that file
+                    if not sent or Path(sent).name != sent or sent.startswith("."):
+                        raise ValueError(f"RomM sent an unusable file name for ROM {plan.rom.id}: {sent!r}")
+                    part.rename(staging / sent)
+                    staging.rename(target)
             finally:
                 shutil.rmtree(staging, ignore_errors=True)
-            part.unlink()
+            part.unlink(missing_ok=True)
         else:
             part.rename(target)
     except BaseException:
