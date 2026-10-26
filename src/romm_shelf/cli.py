@@ -101,7 +101,9 @@ def serve():
 # Discover; it runs in kiosk mode with its own profile, so it never touches the
 # user's browser session and an already-open Firefox doesn't swallow the window.
 # The profile is browser cache only; deleting it loses nothing.
-FIREFOX = ["flatpak", "run", "org.mozilla.firefox"]
+# Firefox finds gamepads through udev, which its sandbox doesn't expose; this
+# grants it for this launch only, leaving the user's Firefox permissions alone.
+FIREFOX = ["flatpak", "run", "--filesystem=/run/udev:ro", "org.mozilla.firefox"]
 FIREFOX_PREFS = {
     "browser.aboutwelcome.enabled": "false",
     "browser.shell.checkDefaultBrowser": "false",
