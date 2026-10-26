@@ -1,0 +1,38 @@
+[project]
+name = "romm-shelf"
+version = "0.1.0"
+description = "Controller-driven RomM client for RetroDECK: downloads and save sync"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "loguru>=0.7.3",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "typer>=0.12",
+]
+
+[project.scripts]
+romm-shelf = "romm_shelf.cli:app"
+
+# Save adapters are discovered through this entry point group. The bundled
+# RetroArch adapter registers here exactly as a third-party one would, so there
+# is no privileged built-in loading path.
+[project.entry-points."romm_shelf.adapters"]
+retroarch = "romm_shelf_retroarch:RetroArchAdapter"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/romm_shelf", "src/romm_shelf_retroarch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: talks to a real RomM server; skipped unless ROMM_SHELF_TEST_URL is set",
+]
