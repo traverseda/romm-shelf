@@ -97,6 +97,83 @@ def serve():
     uvicorn.run(create_app(), host="127.0.0.1", port=Settings().port, log_level="info")
 
 
+# Game Mode launcher (design.md § UI). Firefox is the browser SteamOS users have from
+# Discover; it runs in kiosk mode with its own profile, so it never touches the
+# user's browser session and an already-open Firefox doesn't swallow the window.
+# The profile is browser cache only; deleting it loses nothing.
+FIREFOX = ["flatpak", "run", "org.mozilla.firefox"]
+FIREFOX_PREFS = {
+    "browser.aboutwelcome.enabled": "false",
+    "browser.shell.checkDefaultBrowser": "false",
+    "browser.startup.homepage_override.mstone": '"ignore"',
+    "browser.sessionstore.resume_from_crash": "false",
+    "datareporting.policy.dataSubmissionPolicyBypassNotification": "true",
+    "toolkit.telemetry.reportingpolicy.firstRun": "false",
+    "dom.gamepad.enabled": "true",
+}
+
+
+def _daemon_up(url: str) -> bool:
+    import httpx
+
+    try:
+        return httpx.get(f"{url}/api/activity", timeout=2).is_success
+    except httpx.HTTPError:
+        return False
+
+
+@app.command()
+def ui():
+    """Open the UI full screen (what the Steam shortcut runs). Starts the daemon if it isn't running."""
+    import os
+    import subprocess
+    import time
+
+    url = f"http://127.0.0.1:{Settings().port}"
+    if not _daemon_up(url):
+        subprocess.run(["systemctl", "--user", "start", "romm-shelf.service"], check=False)
+        for _ in range(40):
+            if _daemon_up(url):
+                break
+            time.sleep(0.25)
+        else:
+            raise typer.Exit(f"the romm-shelf daemon isn't answering on {url}")
+    profile = Path("~/.local/share/romm-shelf/firefox").expanduser()
+    profile.mkdir(parents=True, exist_ok=True)
+    (profile / "user.js").write_text("".join(f'user_pref("{k}", {v});\n' for k, v in FIREFOX_PREFS.items()))
+    os.execvp(FIREFOX[0], [*FIREFOX, "--kiosk", "--no-remote", "--profile", str(profile), url])
+
+
+@app.command()
+def shortcut(
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would be added; change nothing")] = False,
+):
+    """Add a "RomM Shelf" entry to the app menu and to Steam, so it can be opened from Game Mode."""
+    import shutil
+    import subprocess
+
+    uv = shutil.which("uv") or str(Path("~/.local/bin/uv").expanduser())
+    project = Path(__file__).resolve().parents[2]
+    desktop = Path("~/.local/share/applications/romm-shelf.desktop").expanduser()
+    entry = (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=RomM Shelf\n"
+        "Comment=Browse your RomM library and sync saves\n"
+        f"Exec={uv} run --project {project} romm-shelf ui\n"
+        "Icon=applications-games\n"
+        "Categories=Game;\n"
+    )
+    typer.echo(f"write {desktop}:\n{entry}")
+    typer.echo(f"steamos-add-to-steam {desktop}")
+    if plan:
+        return
+    desktop.parent.mkdir(parents=True, exist_ok=True)
+    desktop.write_text(entry)
+    subprocess.run(["steamos-add-to-steam", str(desktop)], check=True)
+    typer.echo("# added. In Game Mode it's under Library → Non-Steam.")
+
+
 @app.command()
 def get(
     rom_id: int,

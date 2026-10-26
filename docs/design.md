@@ -425,7 +425,8 @@ romm-shelf rm <rom> [--push-saves]
 romm-shelf sync [--rom R] [--plan] [--confirm]
 romm-shelf hooks install|remove|status
 romm-shelf serve                     # the 127.0.0.1 endpoint for hooks
-romm-shelf ui
+romm-shelf ui                        # full-screen UI (Firefox kiosk); starts the daemon
+romm-shelf shortcut [--plan]         # app menu entry + Steam non-Steam shortcut
 ```
 
 ## Phases
