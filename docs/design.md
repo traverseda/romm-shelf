@@ -240,6 +240,13 @@ shortcut. Screens:
   on device, not downloaded, sync conflict, or saves not synced (shared card).
 - **Game page:** cover, metadata, size, and Download or Remove. It also shows
   save status per slot, with push, pull and resolve actions.
+- **BIOS:** the last tab. For each system with games on RomM it lists the files
+  RetroDECK expects, each with a status: verified, present (no checksum to
+  check), found under another name, wrong checksum, on RomM, or missing. A gets
+  a file from RomM, or removes it (press twice; it goes to the backup folder).
+  Files that are missing both here and on RomM are folded into one row per
+  system. A wrong-checksum file is never removable from the UI, because it is
+  often another BIOS under that name that an emulator is using.
 - **Activity:** the download queue and recent sync sessions.
 - **Settings:** server, pairing, hooks installed or not, backup retention.
 

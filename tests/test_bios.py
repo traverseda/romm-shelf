@@ -100,3 +100,46 @@ def test_import_uploads_shared_content_once(tmp_path, settings):
     touch(tmp_path / "d/x.bin", PSX)
     plan = bios.import_plan(tmp_path / "d", entries, {"psx": 2}, set())
     assert [(i.action, i.entry.filename) for i in plan.items] == [("upload", "scph5501.bin")]
+
+
+class FirmwareClient:
+    def __init__(self, data: bytes):
+        self.data = data
+
+    def download_firmware(self, firmware_id, name):
+        return self.data
+
+
+def test_download_writes_every_folder_and_refuses_bad_bytes(entries, layout):
+    firmware = [{"id": 9, "file_name": "gc-ntsc-12.bin", "md5_hash": md5(GC)}]
+    [s] = [s for s in bios.status(entries, layout, firmware) if s.entry.filename == "gc-ntsc-12.bin"]
+    assert bios.gettable(s, layout)
+    with pytest.raises(ValueError):
+        bios.download(s, FirmwareClient(b"corrupt"), layout)
+    assert not any(p.exists() for p in s.entry.targets(layout))
+    written = bios.download(s, FirmwareClient(GC), layout)
+    assert len(written) == 2 and all(p.read_bytes() == GC for p in written)
+    [s] = [s for s in bios.status(entries, layout, firmware) if s.entry.filename == "gc-ntsc-12.bin"]
+    assert (s.local, bios.gettable(s, layout)) == ("ok", False)
+
+
+def test_mismatch_is_never_gettable(entries, layout):
+    touch(layout.bios / "gba_bios.bin", b"a different dump")
+    firmware = [{"id": 1, "file_name": "gba_bios.bin", "md5_hash": md5(GBA)}]
+    [s] = [s for s in bios.status(entries, layout, firmware) if s.entry.filename == "gba_bios.bin"]
+    assert not bios.gettable(s, layout)
+
+
+def test_remove_moves_to_backup(entries, layout):
+    touch(layout.bios / "gba_bios.bin", GBA)
+    [(src, dest)] = bios.remove(entries, "gba_bios.bin", layout, "stamp")
+    assert not src.exists() and dest.read_bytes() == GBA
+    assert bios.remove(entries, "gba_bios.bin", layout, "stamp") == []
+
+
+def test_removed_file_is_missing_not_found_in_backup(entries, layout):
+    touch(layout.bios / "gba_bios.bin", GBA)
+    bios.remove(entries, "gba_bios.bin", layout, "stamp")
+    firmware = [{"id": 1, "file_name": "gba_bios.bin", "md5_hash": md5(GBA)}]
+    [s] = [s for s in bios.status(entries, layout, firmware) if s.entry.filename == "gba_bios.bin"]
+    assert s.local == "missing" and bios.gettable(s, layout)

@@ -232,7 +232,9 @@ def local_index(layout: RetroDeckLayout, max_size: int = 64 << 20) -> dict[str, 
     """md5 and sha256 of every BIOS-sized file under bios/, so files can be found whatever they're called."""
     index: dict[str, Path] = {}
     for p in layout.bios.rglob("*"):
-        if p.is_file() and not p.name.startswith(".") and p.stat().st_size <= max_size:
+        # Hidden folders include .romm-shelf-backup: a removed file must not count as present.
+        hidden = any(part.startswith(".") for part in p.relative_to(layout.bios).parts)
+        if p.is_file() and not hidden and p.stat().st_size <= max_size:
             for h in hashes(p):
                 index.setdefault(h, p)
     return index
@@ -267,3 +269,50 @@ def status(entries: Iterable[BiosEntry], layout: RetroDeckLayout, firmware: list
 def install_targets(s: BiosStatus, layout: RetroDeckLayout) -> list[Path]:
     """Where a download goes: every listed folder that doesn't already hold this file."""
     return [p for p in s.entry.targets(layout) if not p.exists()]
+
+
+def scoped(entries: list[BiosEntry], with_games: set[str], system: str | None = None,
+           all_systems: bool = False) -> list[BiosEntry]:
+    """Entries for one system, every system, or (the default) systems RomM has games for."""
+    if system:
+        return [e for e in entries if system in e.systems]
+    if all_systems:
+        return entries
+    return [e for e in entries if with_games & set(e.systems)]
+
+
+def gettable(s: BiosStatus, layout: RetroDeckLayout) -> bool:
+    """RomM has it, some listed folder lacks it, and the device doesn't already have it.
+
+    A mismatched local file is never shadowed, and one found elsewhere (another
+    name the emulator also scans for) already works.
+    """
+    return bool(s.firmware_id) and s.local not in ("mismatch", "elsewhere") and bool(install_targets(s, layout))
+
+
+def download(s: BiosStatus, client, layout: RetroDeckLayout) -> list[Path]:
+    """Write RomM's copy to every folder lacking it. Refuses bytes that fail RetroDECK's checksum."""
+    data = client.download_firmware(s.firmware_id, s.firmware_name)
+    if s.entry.verifiable and not s.entry.matches(hashlib.md5(data).hexdigest(), hashlib.sha256(data).hexdigest()):
+        raise ValueError(f"RomM's copy of {s.entry.filename} doesn't match RetroDECK's checksum; not written")
+    written = install_targets(s, layout)
+    for t in written:
+        t.parent.mkdir(parents=True, exist_ok=True)
+        tmp = t.with_name(f".{t.name}.romm-shelf-tmp")
+        tmp.write_bytes(data)
+        tmp.rename(t)
+    return written
+
+
+def remove(entries: Iterable[BiosEntry], filename: str, layout: RetroDeckLayout, stamp: str) -> list[tuple[Path, Path]]:
+    """Move every listed copy of FILENAME into the backup folder. RomM keeps its copy."""
+    from romm_shelf.execute import backup
+
+    moved = []
+    for e in (e for e in entries if e.filename == filename):
+        for p in e.targets(layout):
+            if p.is_file():
+                root = layout.saves if p.is_relative_to(layout.saves) else layout.bios
+                moved.append((p, backup(p, root, stamp)))
+                p.unlink()
+    return moved

@@ -8,6 +8,7 @@ recomputed on start and on /api/refresh; nothing is written to disk.
 import threading
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
@@ -16,8 +17,8 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
+from romm_shelf import bios, sleep
 from romm_shelf import shelf as shelf_ops
-from romm_shelf import sleep
 from romm_shelf.adapters import load_adapters
 from romm_shelf.auth import Session, load_session
 from romm_shelf.config import Settings
@@ -229,6 +230,56 @@ def create_app(settings: Settings | None = None, *, watch_sleep: bool = True) ->
     @app.get("/api/jobs")
     def jobs():
         return list(shelf.jobs.values())
+
+    # BIOS (design.md § BIOS): the same status/get/rm as `romm-shelf bios`.
+    def bios_status(system: str | None = None) -> list[bios.BiosStatus]:
+        with_games = {p.fs_slug for p in shelf.client.platforms() if p.rom_count}
+        entries = bios.scoped(bios.load_entries(shelf.settings), with_games, system)
+        return bios.status(entries, shelf.layout, shelf.client.firmware())
+
+    @app.get("/api/bios")
+    def bios_list():
+        layout = shelf.layout
+        systems: dict[str, dict] = {}
+        for s in bios_status():
+            e = s.entry
+            group = systems.setdefault(e.system, {"system": e.system, "files": []})
+            group["files"].append({
+                "filename": e.filename, "description": e.description, "required": e.required,
+                "local": s.local, "on_romm": bool(s.firmware_id), "can_get": bios.gettable(s, layout),
+                # rm only touches the listed folders; a copy found "elsewhere" is the user's to manage.
+                # Not offered for a mismatch either: it is often another BIOS under this name
+                # (the Deck's scph5500.bin is psxonpsp660), which an emulator may be using.
+                "can_remove": s.local in ("ok", "present"),
+                "where": str(s.local_paths[0].relative_to(layout.bios))
+                if s.local == "elsewhere" and s.local_paths[0].is_relative_to(layout.bios) else None,
+            })
+        return sorted(systems.values(), key=lambda g: g["system"])
+
+    @app.post("/api/bios/get")
+    def bios_get(system: str | None = None, filename: str | None = None):
+        if not system and not filename:
+            raise HTTPException(400, "system or filename")
+        layout = shelf.layout
+        todo = [s for s in bios_status(system) if bios.gettable(s, layout)
+                and (filename is None or s.entry.filename == filename)]
+        ok, failed = [], []
+        for s in todo:
+            try:
+                bios.download(s, shelf.client, layout)
+                ok.append(s.entry.filename)
+            except Exception as e:  # report per file; one bad copy must not stop the rest
+                logger.error("bios get {}: {}", s.entry.filename, e)
+                failed.append({"filename": s.entry.filename, "error": str(e)})
+        return {"downloaded": ok, "failed": failed}
+
+    @app.post("/api/bios/rm")
+    def bios_rm(filename: str):
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        moved = bios.remove(bios.load_entries(shelf.settings), filename, shelf.layout, stamp)
+        if not moved:
+            raise HTTPException(404, "not on this device")
+        return {"moved_to_backup": [str(dest) for _, dest in moved]}
 
     @app.get("/api/cover/{rom_id}")
     def cover(rom_id: int):

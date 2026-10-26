@@ -19,6 +19,10 @@
     .badge { position: absolute; top: 6px; right: 6px; }
     .hint { position: fixed; bottom: 0; left: 0; right: 0; padding: 6px 16px; background: #0c0d11; font-size: 13px; color: #9aa; }
     .detail { background: #1c1f28; color: #e8e8ee; width: 720px; max-width: 95vw; }
+    .bios { padding: 8px 16px 48px; max-width: 1000px; }
+    .bios-row { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-radius: 8px;
+                background: #1c1f28; margin-bottom: 4px; cursor: pointer; }
+    .bios-badge { min-width: 110px; justify-content: center; }
   </style>
 </head>
 <body>
@@ -28,10 +32,43 @@
          tabindex="0" data-nav @click="platform = p.slug">
       {{ p.slug }} <span class="text-grey-5">{{ p.on_device }}/{{ p.total }}</span>
     </div>
+    <div class="tab" :class="{active: platform === BIOS}" tabindex="0" data-nav @click="platform = BIOS">BIOS</div>
   </div>
 
   <div v-if="loading" class="q-pa-xl text-center"><q-spinner size="48px"></q-spinner><div>Loading library…</div></div>
   <div v-else-if="error" class="q-pa-xl text-negative">{{ error }}</div>
+  <div v-else-if="platform === BIOS" class="bios" data-nav-group="grid" data-nav-up="tabs">
+    <div v-if="biosLoading" class="q-pa-xl text-center"><q-spinner size="48px"></q-spinner><div>Checking BIOS files…</div></div>
+    <div v-if="biosMessage" class="q-pa-sm text-grey-4">{{ biosMessage }}</div>
+    <div v-for="g in bios" :key="g.system" class="q-mb-lg">
+      <div class="row items-center q-gutter-sm q-mb-xs">
+        <div class="text-h6">{{ g.system }}</div>
+        <div class="text-grey-5">{{ summary(g) }}</div>
+        <q-space></q-space>
+        <q-btn v-if="gettable(g)" color="primary" unelevated dense class="q-px-md" data-nav :loading="biosBusy === g.system"
+               :label="`Get ${gettable(g)} from RomM`" @click="biosGet({ system: g.system }, g.system)"></q-btn>
+      </div>
+      <div v-for="f in visible(g)" :key="f.filename" class="bios-row" tabindex="0" data-nav @click="biosAct(f)">
+        <q-badge :color="badge(f).color" class="bios-badge">{{ badge(f).label }}</q-badge>
+        <div class="col">
+          <div>{{ f.filename }} <span v-if="f.where" class="text-grey-5">· found as {{ f.where }}</span></div>
+          <div class="text-grey-6" style="font-size:12px">{{ f.description }}<span v-if="f.required && f.required !== 'No'"> · {{ f.required }}</span></div>
+        </div>
+        <div class="text-grey-5" style="white-space:nowrap">
+          <q-spinner v-if="biosBusy === f.filename"></q-spinner>
+          <span v-else-if="f.can_get">A: get</span>
+          <span v-else-if="f.can_remove" :class="{ 'text-negative': confirmBios === f.filename }">
+            {{ confirmBios === f.filename ? "A again: remove" : "A: remove" }}</span>
+        </div>
+      </div>
+      <div v-if="unavailable(g).length && !expanded[g.system]" class="bios-row text-grey-5" tabindex="0" data-nav
+           @click="expanded[g.system] = true">
+        <q-badge color="grey-8" class="bios-badge">{{ unavailable(g).length }} missing</q-badge>
+        <div class="col">{{ visible(g).length ? "Others" : "Files" }} RetroDECK knows about that aren't here or on RomM</div>
+        <div>A: show</div>
+      </div>
+    </div>
+  </div>
   <div v-else class="grid" data-nav-group="grid" data-nav-up="tabs">
     <div v-for="r in shown" :key="r.id" class="card relative-position" tabindex="0" data-nav @click="open(r)">
       <img v-if="r.cover" class="cover" :src="r.cover" loading="lazy" alt="">
@@ -136,7 +173,63 @@ const app = createApp({
     }
     const pct = (j) => Math.floor(100 * j.done / (j.total || 1));
 
+    // BIOS tab (design.md § BIOS): RomM is the source; A gets a file, or removes it (press twice).
+    const BIOS = "__bios";
+    const bios = ref([]), biosLoading = ref(false), biosBusy = ref(null), biosMessage = ref(null);
+    const confirmBios = ref(null);
+    async function loadBios() {
+      biosLoading.value = true;
+      try {
+        const res = await fetch("/api/bios");
+        if (!res.ok) throw new Error(`bios: HTTP ${res.status}`);
+        bios.value = await res.json();
+      } catch (e) { biosMessage.value = String(e); }
+      biosLoading.value = false;
+      // Rows arrive after the tab switch already tried to focus the list.
+      await nextTick();
+      if (!document.activeElement?.closest('[data-nav-group="grid"]'))
+        document.querySelector('[data-nav-group="grid"] [data-nav]')?.focus();
+    }
+    async function biosGet(params, busyKey) {
+      biosBusy.value = busyKey; biosMessage.value = null;
+      const res = await fetch(`/api/bios/get?${new URLSearchParams(params)}`, { method: "POST" });
+      const body = await res.json();
+      biosBusy.value = null;
+      biosMessage.value = !res.ok ? `Failed: ${body.detail}`
+        : `Downloaded ${body.downloaded.length}` + (body.failed.length ? `; failed: ${body.failed.map((f) => f.error).join("; ")}` : ".");
+      await loadBios();
+    }
+    async function biosAct(f) {
+      if (biosBusy.value) return;
+      if (f.can_get) return biosGet({ filename: f.filename }, f.filename);
+      if (!f.can_remove) return;
+      if (confirmBios.value !== f.filename) { confirmBios.value = f.filename; return; }
+      confirmBios.value = null; biosBusy.value = f.filename;
+      const res = await fetch(`/api/bios/rm?${new URLSearchParams({ filename: f.filename })}`, { method: "POST" });
+      biosBusy.value = null;
+      biosMessage.value = res.ok ? `Removed ${f.filename} (moved to the backup folder; RomM keeps its copy).`
+                                 : `Not removed: ${(await res.json()).detail}`;
+      await loadBios();
+    }
+    // Most listed files are alternatives nobody has (101 PS2 revisions); fold those per system.
+    const expanded = ref({});
+    const unavailable = (g) => g.files.filter((f) => f.local === "missing" && !f.on_romm);
+    const visible = (g) => expanded.value[g.system] ? g.files : g.files.filter((f) => f.local !== "missing" || f.on_romm);
+    const gettable = (g) => g.files.filter((f) => f.can_get).length;
+    const summary = (g) => {
+      const here = g.files.filter((f) => f.local !== "missing" && f.local !== "mismatch").length;
+      return `${here} of ${g.files.length} on device`;
+    };
+    const badge = (f) => ({
+      ok: { color: "positive", label: "verified" },
+      present: { color: "teal", label: "present" },
+      elsewhere: { color: "positive", label: "found" },
+      mismatch: { color: "warning", label: "wrong checksum" },
+    })[f.local] || (f.on_romm ? { color: "primary", label: "on RomM" } : { color: "grey-8", label: "missing" });
+    Vue.watch(() => platform.value, (p) => { confirmBios.value = null; if (p === BIOS && !bios.value.length) loadBios(); });
+
     const platforms = computed(() => lib.value.platforms);
+    const tabs = computed(() => [...platforms.value.map((p) => p.slug), BIOS]);
     const shown = computed(() => lib.value.roms.filter((r) => r.platform === platform.value));
 
     async function load(refresh = false) {
@@ -146,7 +239,7 @@ const app = createApp({
         if (!res.ok) throw new Error(`library: HTTP ${res.status}`);
         lib.value = await res.json();
         const withGames = lib.value.platforms.find((p) => p.on_device) || lib.value.platforms[0];
-        if (!platform.value || !lib.value.platforms.some((p) => p.slug === platform.value)) platform.value = withGames?.slug;
+        if (platform.value !== BIOS && !lib.value.platforms.some((p) => p.slug === platform.value)) platform.value = withGames?.slug;
       } catch (e) { error.value = String(e); }
       loading.value = false;
       await nextTick(); focusFirst();
@@ -162,16 +255,19 @@ const app = createApp({
     function restoreFocus() { lastFocus?.focus(); }
 
     function cycle(step) {
-      const ps = platforms.value; if (!ps.length || detailOpen.value) return;
-      const i = ps.findIndex((p) => p.slug === platform.value);
-      platform.value = ps[(i + step + ps.length) % ps.length].slug;
+      const ts = tabs.value; if (detailOpen.value) return;
+      const i = ts.indexOf(platform.value);
+      platform.value = ts[(i + step + ts.length) % ts.length];
       nextTick(() => { document.querySelector(".tab.active")?.scrollIntoView({ inline: "center" });
                        document.querySelector('[data-nav-group="grid"] [data-nav]')?.focus(); });
     }
     window.addEventListener("nav-prev-tab", () => cycle(-1));
     window.addEventListener("nav-next-tab", () => cycle(1));
     window.addEventListener("nav-back", () => { detailOpen.value = false; });
-    window.addEventListener("nav-refresh", () => { if (!detailOpen.value) load(true); });
+    window.addEventListener("nav-refresh", () => {
+      if (detailOpen.value) return;
+      platform.value === BIOS ? loadBios() : load(true);
+    });
 
     const size = (b) => b > 1 << 30 ? `${(b / (1 << 30)).toFixed(1)} GB` : b > 1 << 20 ? `${(b / (1 << 20)).toFixed(1)} MB` : `${Math.ceil(b / 1024)} KB`;
     const when = (t) => new Date(t * 1000).toLocaleString();
@@ -179,7 +275,9 @@ const app = createApp({
     load();
     watchJobs();  // pick up downloads already running in the daemon
     return { platforms, platform, shown, loading, error, detail, detailOpen, open, restoreFocus, size, when,
-             jobs, job, message, busy, confirmRemove, install, uninstall, pct };
+             jobs, job, message, busy, confirmRemove, install, uninstall, pct,
+             BIOS, bios, biosLoading, biosBusy, biosMessage, confirmBios, biosGet, biosAct, gettable, summary, badge,
+             expanded, unavailable, visible };
   },
 });
 app.use(Quasar, { config: { dark: true } });

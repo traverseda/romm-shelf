@@ -1,6 +1,5 @@
 """Command line interface. Every UI action has a command here (design.md § Parity)."""
 
-import hashlib
 import json
 import sys
 from collections import Counter
@@ -18,7 +17,6 @@ from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import match, scan_local
 from romm_shelf import bios, hooks
 from romm_shelf import shelf as shelf_ops
-from romm_shelf.execute import backup
 from romm_shelf.service import rom_for_path, sync_roms
 from romm_shelf.sync import inventory, negotiate_payload
 
@@ -157,12 +155,8 @@ app.add_typer(bios_app, name="bios")
 
 
 def _bios_scope(entries, client, system: str | None, all_systems: bool):
-    if system:
-        return [e for e in entries if system in e.systems]
-    if all_systems:
-        return entries
-    with_games = {p.fs_slug for p in client.platforms() if p.rom_count}
-    return [e for e in entries if with_games & set(e.systems)]
+    with_games = set() if system or all_systems else {p.fs_slug for p in client.platforms() if p.rom_count}
+    return bios.scoped(entries, with_games, system, all_systems)
 
 
 @bios_app.command("import")
@@ -228,8 +222,7 @@ def bios_get(
     """Download BIOS files RomM has and this device lacks. Mismatched local files are never overwritten."""
     settings, session, client, layout = _context()
     entries = _bios_scope(bios.load_entries(settings), client, system, all_systems)
-    todo = [s for s in bios.status(entries, layout, client.firmware())
-            if s.firmware_id and s.local != "mismatch" and bios.install_targets(s, layout)]
+    todo = [s for s in bios.status(entries, layout, client.firmware()) if bios.gettable(s, layout)]
     for s in todo:
         for t in bios.install_targets(s, layout):
             typer.echo(f"get  {s.entry.system:10} {s.entry.filename}  -> {t}")
@@ -237,16 +230,11 @@ def bios_get(
         typer.echo(f"# {len(todo)} to download")
         return
     for s in todo:
-        data = client.download_firmware(s.firmware_id, s.firmware_name)
-        if s.entry.verifiable and not s.entry.matches(hashlib.md5(data).hexdigest(), hashlib.sha256(data).hexdigest()):
-            typer.echo(f"FAIL {s.entry.filename}: RomM's copy doesn't match RetroDECK's checksum; not written")
-            continue
-        for t in bios.install_targets(s, layout):
-            t.parent.mkdir(parents=True, exist_ok=True)
-            tmp = t.with_name(f".{t.name}.romm-shelf-tmp")
-            tmp.write_bytes(data)
-            tmp.rename(t)
-        typer.echo(f"ok   {s.entry.system} {s.entry.filename}")
+        try:
+            bios.download(s, client, layout)
+            typer.echo(f"ok   {s.entry.system} {s.entry.filename}")
+        except ValueError as e:
+            typer.echo(f"FAIL {e}")
 
 
 @bios_app.command("rm")
@@ -254,15 +242,9 @@ def bios_rm(filename: str):
     """Remove a BIOS file from this device (moved to the backup folder, not deleted). RomM keeps its copy."""
     settings, session, client, layout = _context()
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    moved = 0
-    for e in (e for e in bios.load_entries(settings) if e.filename == filename):
-        for p in e.targets(layout):
-            if p.is_file():
-                root = layout.saves if p.is_relative_to(layout.saves) else layout.bios
-                dest = backup(p, root, stamp)
-                p.unlink()
-                moved += 1
-                typer.echo(f"moved {p} -> {dest}")
+    moved = bios.remove(bios.load_entries(settings), filename, layout, stamp)
+    for p, dest in moved:
+        typer.echo(f"moved {p} -> {dest}")
     if not moved:
         typer.echo(f"# {filename} is not on this device")
 
