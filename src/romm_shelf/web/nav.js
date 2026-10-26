@@ -92,16 +92,23 @@ function pressed(pad, i) {
   return { 12: y < -DEADZONE, 13: y > DEADZONE, 14: x < -DEADZONE, 15: x > DEADZONE }[i] ?? false;
 }
 
+// On a Steam Deck the browser sees one physical controller twice: Steam Input's
+// virtual pad and the built-in controller under it. Buttons are merged across
+// pads, so one press is one action. Pads with the standard layout are preferred,
+// so a raw device with other button numbers can't add stray presses.
+function pads() {
+  const all = [...(navigator.getGamepads?.() ?? [])].filter(Boolean);
+  const standard = all.filter((p) => p.mapping === "standard");
+  return standard.length ? standard : all;
+}
+
 function poll(now) {
-  for (const pad of navigator.getGamepads?.() ?? []) {
-    if (!pad) continue;
-    for (const i of Object.keys(BUTTONS).map(Number)) {
-      const key = `${pad.index}:${i}`;
-      if (!pressed(pad, i)) { held.delete(key); continue; }
-      const next = held.get(key);
-      if (next === undefined) { BUTTONS[i](); held.set(key, now + FIRST_DELAY); }
-      else if (REPEATS.has(i) && now >= next) { BUTTONS[i](); held.set(key, now + REPEAT_EVERY); }
-    }
+  const connected = pads();
+  for (const i of Object.keys(BUTTONS).map(Number)) {
+    if (!connected.some((pad) => pressed(pad, i))) { held.delete(i); continue; }
+    const next = held.get(i);
+    if (next === undefined) { BUTTONS[i](); held.set(i, now + FIRST_DELAY); }
+    else if (REPEATS.has(i) && now >= next) { BUTTONS[i](); held.set(i, now + REPEAT_EVERY); }
   }
   requestAnimationFrame(poll);
 }
