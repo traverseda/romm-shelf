@@ -188,6 +188,21 @@ class RommClient:
                 if progress:
                     progress(done, total)
 
+    def firmware(self) -> list[dict]:
+        return self._get("/firmware")
+
+    def upload_firmware(self, platform_id: int, path: Path, file_name: str) -> list[dict]:
+        with path.open("rb") as f:
+            r = self.http.post("/firmware", params={"platform_id": platform_id},
+                               files=[("files", (file_name, f))])
+        r.raise_for_status()
+        return r.json()
+
+    def download_firmware(self, firmware_id: int, file_name: str) -> bytes:
+        r = self.http.get(f"/firmware/{firmware_id}/content/{file_name}")
+        r.raise_for_status()
+        return r.content
+
     def saves(self, rom_id: int) -> list[dict]:
         return self._get("/saves", rom_id=rom_id)
 

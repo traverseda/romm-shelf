@@ -1,8 +1,10 @@
 """Command line interface. Every UI action has a command here (design.md § Parity)."""
 
+import hashlib
 import json
 import sys
 from collections import Counter
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -14,8 +16,9 @@ from romm_shelf.auth import device_login, load_session, save_credentials
 from romm_shelf.config import Settings
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import match, scan_local
-from romm_shelf import hooks
+from romm_shelf import bios, hooks
 from romm_shelf import shelf as shelf_ops
+from romm_shelf.execute import backup
 from romm_shelf.service import rom_for_path, sync_roms
 from romm_shelf.sync import inventory, negotiate_payload
 
@@ -147,6 +150,121 @@ def rm(
         raise typer.Exit(1)
     shelf_ops.uninstall(local.path)
     typer.echo("# removed. Restart ES-DE to drop it from the game list.")
+
+
+bios_app = typer.Typer(no_args_is_help=True, help="BIOS/firmware: RomM is the source of truth; devices pull.")
+app.add_typer(bios_app, name="bios")
+
+
+def _bios_scope(entries, client, system: str | None, all_systems: bool):
+    if system:
+        return [e for e in entries if system in e.systems]
+    if all_systems:
+        return entries
+    with_games = {p.fs_slug for p in client.platforms() if p.rom_count}
+    return [e for e in entries if with_games & set(e.systems)]
+
+
+@bios_app.command("import")
+def bios_import(
+    folder: Path,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would be uploaded; upload nothing")] = False,
+    include_unverified: Annotated[bool, typer.Option(help="Also upload files RetroDECK lists without a checksum "
+                                                          "(e.g. Switch keys), matched by name only")] = False,
+):
+    """One-time: upload the BIOS files in FOLDER that RetroDECK knows about to RomM."""
+    settings = Settings()
+    client = load_session(settings).client()
+    entries = bios.load_entries(settings)
+    platforms = {p.fs_slug: p.id for p in client.platforms()}
+    on_romm = {(f["platform_id"], (f.get("md5_hash") or "").lower()) for f in client.firmware()}
+    shipped = bios.Shipped([settings.resolve(r) for r in bios.RETRODECK_INSTALLS])
+    p = bios.import_plan(folder.expanduser(), entries, platforms, on_romm,
+                         include_unverified=include_unverified, shipped=shipped)
+    for item in p.items:
+        if item.action != "shipped":
+            typer.echo(item.describe())
+    counts = Counter(i.action for i in p.items)
+    typer.echo(f"# {', '.join(f'{k}: {v}' for k, v in sorted(counts.items()))}; not in RetroDECK's list: {len(p.unknown)}")
+    if counts["no-platform"]:
+        typer.echo("# no-platform: RomM has no platform for that system; add it in RomM to import those")
+    if plan:
+        return
+    failed = 0
+    for item in (i for i in p.items if i.action == "upload"):
+        try:
+            client.upload_firmware(item.platform_id, item.source, item.entry.filename)
+            typer.echo(f"ok   {item.entry.system} {item.entry.filename}")
+        except Exception as e:
+            failed += 1
+            typer.echo(f"FAIL {item.entry.system} {item.entry.filename}: {e}")
+    if failed:
+        raise typer.Exit(1)
+
+
+@bios_app.command("status")
+def bios_status(
+    system: Annotated[str | None, typer.Option(help="Only this system")] = None,
+    all_systems: Annotated[bool, typer.Option("--all", help="Every system RetroDECK knows, not just ones with games")] = False,
+    missing: Annotated[bool, typer.Option(help="Only files missing here")] = False,
+):
+    """Which BIOS files are on this device, and which are on RomM."""
+    settings, session, client, layout = _context()
+    entries = _bios_scope(bios.load_entries(settings), client, system, all_systems)
+    for s in bios.status(entries, layout, client.firmware()):
+        if missing and s.local != "missing":
+            continue
+        romm = "on-romm" if s.firmware_id else "-"
+        where = f"  (as {s.local_paths[0].relative_to(layout.bios)})" if s.local == "elsewhere" else ""
+        typer.echo(f"{s.local:9} {romm:7} {s.entry.system:10} {s.entry.filename:32} {s.entry.required}{where}")
+
+
+@bios_app.command("get")
+def bios_get(
+    system: Annotated[str | None, typer.Option(help="Only this system")] = None,
+    all_systems: Annotated[bool, typer.Option("--all", help="Every system, not just ones with games")] = False,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would be downloaded")] = False,
+):
+    """Download BIOS files RomM has and this device lacks. Mismatched local files are never overwritten."""
+    settings, session, client, layout = _context()
+    entries = _bios_scope(bios.load_entries(settings), client, system, all_systems)
+    todo = [s for s in bios.status(entries, layout, client.firmware())
+            if s.firmware_id and s.local != "mismatch" and bios.install_targets(s, layout)]
+    for s in todo:
+        for t in bios.install_targets(s, layout):
+            typer.echo(f"get  {s.entry.system:10} {s.entry.filename}  -> {t}")
+    if plan or not todo:
+        typer.echo(f"# {len(todo)} to download")
+        return
+    for s in todo:
+        data = client.download_firmware(s.firmware_id, s.firmware_name)
+        if s.entry.verifiable and not s.entry.matches(hashlib.md5(data).hexdigest(), hashlib.sha256(data).hexdigest()):
+            typer.echo(f"FAIL {s.entry.filename}: RomM's copy doesn't match RetroDECK's checksum; not written")
+            continue
+        for t in bios.install_targets(s, layout):
+            t.parent.mkdir(parents=True, exist_ok=True)
+            tmp = t.with_name(f".{t.name}.romm-shelf-tmp")
+            tmp.write_bytes(data)
+            tmp.rename(t)
+        typer.echo(f"ok   {s.entry.system} {s.entry.filename}")
+
+
+@bios_app.command("rm")
+def bios_rm(filename: str):
+    """Remove a BIOS file from this device (moved to the backup folder, not deleted). RomM keeps its copy."""
+    settings, session, client, layout = _context()
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    moved = 0
+    for e in (e for e in bios.load_entries(settings) if e.filename == filename):
+        for p in e.targets(layout):
+            if p.is_file():
+                root = layout.saves if p.is_relative_to(layout.saves) else layout.bios
+                dest = backup(p, root, stamp)
+                p.unlink()
+                moved += 1
+                typer.echo(f"moved {p} -> {dest}")
+    if not moved:
+        typer.echo(f"# {filename} is not on this device")
 
 
 hooks_app = typer.Typer(no_args_is_help=True, help="ES-DE hooks and the daemon's systemd unit.")

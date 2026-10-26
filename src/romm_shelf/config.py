@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     es_settings: Path = Path("~/.var/app/net.retrodeck.retrodeck/config/ES-DE/settings/es_settings.xml")
     systemd_user_dir: Path = Path("~/.config/systemd/user")
 
+    bios_list: Path | None = None
+    """RetroDECK's reference_lists/bios.json; found in the flatpak install when unset."""
+
     port: int = 8765
     """The daemon's port on 127.0.0.1; the ES-DE hook scripts call it."""
 
