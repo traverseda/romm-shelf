@@ -108,7 +108,13 @@ FIREFOX_PREFS = {
     "browser.aboutwelcome.enabled": "false",
     "browser.shell.checkDefaultBrowser": "false",
     "browser.startup.homepage_override.mstone": '"ignore"',
+    # Steam's "Exit game" kills the browser, which Firefox takes for a crash: no
+    # "restore previous tabs?" bar and no Safe Mode prompt, neither can be closed in kiosk mode.
     "browser.sessionstore.resume_from_crash": "false",
+    "browser.sessionstore.max_resumed_crashes": "0",
+    "browser.startup.couldRestoreSession.count": "-1",
+    "browser.startup.page": "0",
+    "toolkit.startup.max_resumed_crashes": "-1",
     "datareporting.policy.dataSubmissionPolicyBypassNotification": "true",
     "toolkit.telemetry.reportingpolicy.firstRun": "false",
     "dom.gamepad.enabled": "true",
@@ -128,6 +134,7 @@ def _daemon_up(url: str) -> bool:
 def ui():
     """Open the UI full screen (what the Steam shortcut runs). Starts the daemon if it isn't running."""
     import os
+    import shutil
     import subprocess
     import time
 
@@ -143,6 +150,9 @@ def ui():
     # Inside Firefox's own Flatpak data folder: the sandbox can't see the rest of home.
     profile = Path("~/.var/app/org.mozilla.firefox/data/romm-shelf-profile").expanduser()
     profile.mkdir(parents=True, exist_ok=True)
+    for name in ("sessionstore.jsonlz4", "sessionCheckpoints.json", "sessionstore-backups"):
+        stale = profile / name  # the last session; there's never anything in it worth restoring
+        shutil.rmtree(stale) if stale.is_dir() else stale.unlink(missing_ok=True)
     (profile / "user.js").write_text("".join(f'user_pref("{k}", {v});\n' for k, v in FIREFOX_PREFS.items()))
     os.execvp(FIREFOX[0], [*FIREFOX, "--kiosk", "--no-remote", "--profile", str(profile), url])
 
