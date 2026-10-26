@@ -15,7 +15,7 @@ from romm_shelf.auth import device_login, load_session, save_credentials
 from romm_shelf.config import Settings
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import match, scan_local
-from romm_shelf import bios, hooks
+from romm_shelf import bios, external, hooks
 from romm_shelf import shelf as shelf_ops
 from romm_shelf.service import rom_for_path, sync_roms
 from romm_shelf.sync import inventory, negotiate_payload
@@ -280,6 +280,61 @@ def hooks_remove(plan: Annotated[bool, typer.Option("--plan", help="Print the ch
     if not plan:
         hooks.apply(changes)
         typer.echo("# removed")
+
+
+external_app = typer.Typer(no_args_is_help=True,
+                           help="External emulators: AppImages kept in RomM, run inside RetroDECK via ES-DE.")
+app.add_typer(external_app, name="external")
+
+
+def _external(name: str) -> external.External:
+    known = external.load_externals()
+    if name not in known:
+        raise SystemExit(f"unknown external {name!r}; known: {', '.join(sorted(known)) or 'none'}")
+    return known[name]
+
+
+@external_app.command("list")
+def external_list():
+    """Known externals and the AppImage RomM has for each."""
+    client = load_session(Settings()).client()
+    firmware, platforms = client.firmware(), {p.fs_slug: p.id for p in client.platforms()}
+    for ext in external.load_externals().values():
+        fw = external.newest_appimage(ext, firmware, platforms)
+        typer.echo(f"{ext.name:10} {ext.platform:10} {fw['file_name'] if fw else '(not in RomM: ' + ext.pattern + ')'}")
+
+
+@external_app.command("install")
+def external_install(
+    name: str,
+    plan: Annotated[bool, typer.Option("--plan", help="Print the changes; make none")] = False,
+):
+    """Install or update NAME from the newest matching AppImage in RomM, and make it ES-DE's default."""
+    settings = Settings()
+    ext = _external(name)
+    client = load_session(settings).client()
+    steps = external.install_plan(settings, ext, client.firmware(), {p.fs_slug: p.id for p in client.platforms()})
+    for s in steps:
+        typer.echo(s.describe())
+    if not steps:
+        typer.echo(f"# {name} is installed and current")
+    elif not plan:
+        external.apply(steps, client)
+        typer.echo(f"# installed. Restart ES-DE to use {ext.es_label} for {ext.platform}.")
+
+
+@external_app.command("remove")
+def external_remove(
+    name: str,
+    plan: Annotated[bool, typer.Option("--plan", help="Print the changes; make none")] = False,
+):
+    """Undo `external install NAME`. Saves, keys and firmware stay where they are."""
+    steps = external.remove_plan(Settings(), _external(name))
+    for s in steps:
+        typer.echo(s.describe())
+    if steps and not plan:
+        external.apply(steps)
+        typer.echo("# removed. Restart ES-DE.")
 
 
 @app.command()

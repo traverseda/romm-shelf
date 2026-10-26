@@ -230,6 +230,30 @@ still on the server, or in the local backup folder.
 - **ES-DE refresh:** ES-DE has to rescan to see new games. The UI says so. A
   restart of ES-DE is possible, but it's an open question; see todo.md.
 
+## External emulators
+
+RetroDECK can't take add-on components: they're baked into the flatpak. An
+emulator it doesn't ship (Eden, for Switch) is added from outside instead, the
+way RetroDECK's old Ponzu feature did for Yuzu (`external.py`):
+
+- **Source:** the AppImage is uploaded to RomM as firmware for its platform.
+  `romm-shelf external install NAME` takes the most recently uploaded match, so
+  uploading a newer build and re-running it is how an emulator is updated. The
+  AppImage's own updater is turned off.
+- **Files:** it's unpacked under `<rd_home>/external/NAME/<version>/` (AppImages
+  can't mount inside a flatpak), with a `current` link and a `launch.sh`.
+- **Folders:** the emulator's data folders inside the sandbox are linked to
+  RetroDECK's: keys and firmware under `bios/`, saves under `saves/`. Existing
+  data is never shadowed; the install refuses instead.
+- **ES-DE:** a marked block in `ES-DE/custom_systems/es_find_rules.xml` says
+  where the emulator is, and one in `es_systems.xml` copies the bundled system
+  with this emulator's command first, which makes it the default. The bundled
+  emulators stay as alternatives.
+- **Plugins:** each emulator is an `External` declared in the
+  `romm_shelf.externals` entry-point group (`romm_shelf_eden`).
+- **Remove:** `external remove NAME` takes out the blocks, the links and the
+  unpacked files. Saves, keys and firmware stay.
+
 ## UI
 
 The UI is controller-first: a d-pad and A/B/X/Y drive everything, and nothing
@@ -247,7 +271,11 @@ shortcut. Screens:
   Files that are missing both here and on RomM are folded into one row per
   system. A wrong-checksum file is never removable from the UI, because it is
   often another BIOS under that name that an emulator is using.
-- **Activity:** the download queue and recent sync sessions.
+- **Activity:** the last 50 jobs the daemon ran, whoever started them: installs
+  (bytes), syncs from hooks, sleep or uninstall (files), and BIOS downloads. A
+  row expands to its per-file log. While anything runs, a strip above the hint
+  bar shows it on every screen. Kept in memory only. Syncs run from the CLI are
+  a separate process and don't appear.
 - **Settings:** server, pairing, hooks installed or not, backup retention.
 
 ### Toolkit: Quasar, served by the local daemon
