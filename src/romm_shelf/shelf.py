@@ -52,7 +52,9 @@ def install(plan: InstallPlan, client: RommClient, progress: Progress | None = N
         if plan.multi:
             staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
             try:
-                if sent == f"{target.name}.zip" or (sent is None and plan.rom.has_multiple_files):
+                # A multi-file ROM always comes zipped. RomM 5.4 names it after the requested
+                # path, so asking for <fs_name>.zip gets <fs_name>.zip.zip back.
+                if plan.rom.has_multiple_files or sent == f"{target.name}.zip":
                     unpack(part, staging, target.name).rename(target)
                 else:  # a folder holding one file, sent as that file
                     if not sent or Path(sent).name != sent or sent.startswith("."):

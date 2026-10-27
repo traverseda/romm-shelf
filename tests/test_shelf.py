@@ -62,6 +62,14 @@ def test_multi_file_zip_wrapped_in_game_folder(layout):
     assert [p.name for p in plan.target.iterdir()] == ["disc.cue"]
 
 
+def test_multi_file_zip_with_doubled_suffix(layout):
+    # RomM 5.4.1 sent BotW (rom 1391) as "<fs_name>.zip.zip".
+    r = rom(1391, "switch", "Game (Base Game)").model_copy(update={"has_multiple_files": True})
+    plan = shelf.install_plan(r, layout)
+    shelf.install(plan, FakeClient(_zip({"base.nsp": b"a", "update.nsp": b"b"}), sent="Game (Base Game).zip.zip"))
+    assert sorted(p.name for p in plan.target.iterdir()) == ["base.nsp", "update.nsp"]
+
+
 def test_folder_with_one_file_is_sent_as_that_file(layout):
     r = rom(1045, "psx", "Gran Turismo 2").model_copy(update={"has_nested_single_file": True})
     plan = shelf.install_plan(r, layout)
