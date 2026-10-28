@@ -437,7 +437,7 @@ def external_install(
     if not steps:
         typer.echo(f"# {name} is installed and current")
     elif not plan:
-        external.apply(steps, client)
+        external.apply(steps, client, ext.process)
         typer.echo(f"# installed. Restart ES-DE to use {ext.es_label} for {ext.platform}.")
 
 

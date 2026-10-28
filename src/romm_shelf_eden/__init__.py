@@ -35,6 +35,13 @@ EDEN = External(
     ),
     # RomM is where updates come from; the AppImage's own updater stays off.
     env={"DISABLE_AUTO_UPDATES": "1"},
+    # A config carried over from RetroDECK's Yuzu setup names yuzu's folders outright,
+    # which beats the links: Eden then saves where EdenAdapter doesn't look.
+    settings=(
+        ("eden/qt-config.ini", "nand_directory", "$saves_path/switch/eden/nand"),
+        ("eden/qt-config.ini", "sdmc_directory", "$saves_path/switch/eden/sdmc"),
+    ),
+    process="eden",
 )
 
 

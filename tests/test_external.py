@@ -81,6 +81,18 @@ def test_install_wires_es_de_and_folders(settings, deck, deck_es):
                                  PLATFORMS) == []
 
 
+def test_points_a_carried_over_folder_setting_at_retrodeck(settings, deck, deck_es):
+    ini = deck / "home/deck/.var/app/net.retrodeck.retrodeck/config/eden/qt-config.ini"
+    touch(ini, b"[Data%20Storage]\nnand_directory=/home/deck/Emulation/retrodeck/saves/switch/yuzu/nand\n"
+               b"nand_directory\\default=false\nload_directory=/x\n")
+    steps = install(settings, [fw(7, "Eden-Linux-v0.2.1.appimage", "2026-10-26")])
+    assert [s.name for s in steps if s.action == "setting"] == ["nand_directory"]  # sdmc isn't set: left alone
+    assert ini.read_text() == ("[Data%20Storage]\nnand_directory=/home/deck/Emulation/retrodeck/saves/switch/eden/nand\n"
+                               "nand_directory\\default=false\nload_directory=/x\n")
+    assert external.install_plan(settings, EDEN, [fw(7, "Eden-Linux-v0.2.1.appimage", "2026-10-26")],
+                                 PLATFORMS) == []
+
+
 def test_newer_upload_replaces_the_old_version(settings, deck, deck_es):
     install(settings, [fw(7, "Eden-Linux-v0.2.1.appimage", "2026-10-26")])
     steps = install(settings, [fw(7, "Eden-Linux-v0.2.1.appimage", "2026-10-26"),

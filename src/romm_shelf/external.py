@@ -57,6 +57,11 @@ class External:
     """(path under the flatpak's XDG_DATA_HOME, RetroDECK folder it should point at)."""
     env: dict[str, str] = field(default_factory=dict)
     """Set by the launcher."""
+    settings: tuple[tuple[str, str, str], ...] = ()
+    """(ini file under the flatpak's config folder, key, value): a folder setting the emulator
+    keeps itself, which would override the links. Only changed when the key is already set."""
+    process: str = ""
+    """The emulator's process name; its settings aren't edited while it runs (it rewrites them on exit)."""
 
 
 def load_externals() -> dict[str, External]:
@@ -65,7 +70,8 @@ def load_externals() -> dict[str, External]:
 
 @dataclass(frozen=True)
 class Step:
-    action: Literal["install", "current", "launcher", "link", "unlink", "block", "unblock", "rmtree", "mkdir"]
+    action: Literal["install", "current", "launcher", "link", "unlink", "block", "unblock", "rmtree", "mkdir",
+                    "setting"]
     target: Path
     detail: str
     content: str | None = None
@@ -86,10 +92,14 @@ class Paths:
     """The same folder as RetroDECK and ES-DE see it (no fs_root), for paths written into files."""
     data: Path
     """The flatpak's XDG_DATA_HOME."""
+    config: Path
+    """The flatpak's XDG_CONFIG_HOME."""
     custom: Path
     """ES-DE/custom_systems."""
     rd: dict[str, Path]
     """RetroDECK's $variables, resolved."""
+    rd_as_seen: dict[str, str]
+    """The same, as RetroDECK sees them, for values written into files."""
 
 
 def paths(settings: Settings, ext: External) -> Paths:
@@ -101,13 +111,19 @@ def paths(settings: Settings, ext: External) -> Paths:
         home_as_seen=f"{raw['rd_home_path']}/external/{ext.name}",
         # retrodeck.json lives in <app>/config/retrodeck/; the sandbox's data home is <app>/data.
         data=cfg.parents[2] / "data",
+        config=cfg.parents[1],
         custom=home / "ES-DE" / "custom_systems",
         rd={k: settings.resolve(v) for k, v in raw.items() if isinstance(v, str)},
+        rd_as_seen={k: v for k, v in raw.items() if isinstance(v, str)},
     )
 
 
-def _expand(template: str, rd: dict[str, Path]) -> Path:
+def _expand(template: str, rd: dict) -> Path:
     return Path(re.sub(r"\$(\w+)", lambda m: str(rd.get(m.group(1), m.group(0))), template))
+
+
+def _setting_re(key: str) -> re.Pattern:
+    return re.compile(rf"^{re.escape(key)}=(.*)$", re.M)
 
 
 def _marker(ext: External) -> str:
@@ -220,6 +236,12 @@ def install_plan(settings: Settings, ext: External, firmware: list[dict], platfo
             steps.append(Step("mkdir", source, "RetroDECK folder for the link"))
         steps.append(Step("link", target, f"-> {source}", source=source))
 
+    for rel, key, template in ext.settings:
+        f, value = p.config / rel, str(_expand(template, p.rd_as_seen))
+        m = _setting_re(key).search(f.read_text()) if f.exists() else None
+        if m and m.group(1) != value:
+            steps.append(Step("setting", f, f"{key}={value} (was {m.group(1)})", content=value, name=key))
+
     blocks = {"systems": _system_block(ext, bundled_system(settings, ext.platform)), "rules": _rule_block(ext, p)}
     for kind, block in blocks.items():
         f, root = _custom_file(p, kind)
@@ -264,9 +286,12 @@ def _unpack(appimage: Path, dest: Path) -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def apply(steps: list[Step], client=None) -> None:
+def apply(steps: list[Step], client=None, process: str = "") -> None:
     if any(s.action in ("block", "unblock") for s in steps) and es_de_running():
         raise SystemExit("ES-DE is running; close it and retry (it reads custom systems at start).")
+    if process and any(s.action == "setting" for s in steps) and \
+            subprocess.run(["pgrep", "-x", process], capture_output=True).returncode == 0:
+        raise SystemExit(f"{process} is running and rewrites its settings when it exits; close it and retry.")
     for s in steps:
         match s.action:
             case "install":
@@ -291,6 +316,9 @@ def apply(steps: list[Step], client=None) -> None:
             case "mkdir":
                 s.target.mkdir(parents=True, exist_ok=True)
             case "link":
+                # An earlier link in this plan may already have brought it (firmware inside nand).
+                if s.target.is_symlink() and s.target.readlink() == s.source:
+                    continue
                 s.target.parent.mkdir(parents=True, exist_ok=True)
                 if s.target.is_dir() and not s.target.is_symlink():
                     s.target.rmdir()  # empty; the plan refused anything else
@@ -301,6 +329,10 @@ def apply(steps: list[Step], client=None) -> None:
                 shutil.rmtree(s.target)
             case "block" | "unblock":
                 _edit_block(s)
+            case "setting":
+                shutil.copy2(s.target, s.target.with_name(s.target.name + ".romm-shelf.bak"))
+                s.target.write_text(_setting_re(s.name).sub(lambda m: f"{s.name}={s.content}",
+                                                             s.target.read_text(), count=1))
 
 
 def _edit_block(s: Step) -> None:
