@@ -118,6 +118,7 @@ FIREFOX_PREFS = {
     "datareporting.policy.dataSubmissionPolicyBypassNotification": "true",
     "toolkit.telemetry.reportingpolicy.firstRun": "false",
     "dom.gamepad.enabled": "true",
+    "browser.cache.disk.enable": "false",
 }
 
 
@@ -150,7 +151,10 @@ def ui():
     # Inside Firefox's own Flatpak data folder: the sandbox can't see the rest of home.
     profile = Path("~/.var/app/org.mozilla.firefox/data/romm-shelf-profile").expanduser()
     profile.mkdir(parents=True, exist_ok=True)
-    for name in ("sessionstore.jsonlz4", "sessionCheckpoints.json", "sessionstore-backups"):
+    # The cache too: everything is served from this machine, and a stale nav.js once
+    # survived several updates.
+    for name in ("sessionstore.jsonlz4", "sessionCheckpoints.json", "sessionstore-backups",
+                 "cache2", "startupCache"):
         stale = profile / name  # the last session; there's never anything in it worth restoring
         shutil.rmtree(stale) if stale.is_dir() else stale.unlink(missing_ok=True)
     (profile / "user.js").write_text("".join(f'user_pref("{k}", {v});\n' for k, v in FIREFOX_PREFS.items()))

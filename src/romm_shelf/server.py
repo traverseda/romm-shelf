@@ -352,7 +352,16 @@ def create_app(settings: Settings | None = None, *, watch_sleep: bool = True) ->
 
     @app.get("/")
     def index():
-        return FileResponse(WEB / "index.html")
+        return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
+
+    # no-cache means "revalidate", not "don't store": the browser still uses its
+    # copy when the ETag matches, but never runs an old nav.js after an update.
+    @app.middleware("http")
+    async def revalidate(request, call_next):
+        response = await call_next(request)
+        if not request.url.path.startswith("/api/"):
+            response.headers.setdefault("Cache-Control", "no-cache")
+        return response
 
     app.mount("/", StaticFiles(directory=WEB), name="web")
     return app
