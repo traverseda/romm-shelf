@@ -335,6 +335,24 @@ way RetroDECK's old Ponzu feature did for Yuzu (`external.py`):
 - **Remove:** `external remove NAME` takes out the blocks, the links and the
   unpacked files. Saves, keys and firmware stay.
 
+## Patches
+
+A *patch* is one change romm-shelf makes to RetroDECK or the system: the ES-DE
+hooks with the daemon's unit (`hooks`), or one external emulator (`eden`).
+`romm-shelf patches` and the UI's Patches tab list them (`patches.py`).
+
+- **State comes from the plan.** Nothing records what was applied. A patch whose
+  install plan is empty is *applied*; one whose plan only adds is *not applied*;
+  one with something of ours already there and more to do needs an *update*
+  (a newer AppImage in RomM, a changed hook script). A plan that refuses (no
+  AppImage in RomM, data in the way, a user-written system) is *blocked*, with
+  the reason.
+- **Apply and remove** run the same plans as `hooks install` and
+  `external install|remove`, as Activity jobs. The UI shows the plan before
+  applying, and the remove plan on the first press of a press-twice Remove.
+- The UI never removes `hooks`: that stops the daemon serving it. Use
+  `romm-shelf hooks remove`.
+
 ## UI
 
 The UI is controller-first: a d-pad and A/B/X/Y drive everything, and nothing
@@ -357,6 +375,8 @@ shortcut. Screens:
   row expands to its per-file log. While anything runs, a strip above the hint
   bar shows it on every screen. Kept in memory only. Syncs run from the CLI are
   a separate process and don't appear.
+- **Patches:** before BIOS. Each patch with its state and the plan applying it
+  would run now; Apply/Update, and Remove (press twice). See [Patches](#patches).
 - **Settings:** server, pairing, hooks installed or not, backup retention.
 
 ### Toolkit: Quasar, served by the local daemon
@@ -424,6 +444,8 @@ romm-shelf get <rom>                 # download
 romm-shelf rm <rom> [--push-saves]
 romm-shelf sync [--rom R] [--plan] [--confirm]
 romm-shelf hooks install|remove|status
+romm-shelf external list|install|remove <name>
+romm-shelf patches                   # hooks and externals: applied, update, not applied, blocked
 romm-shelf serve                     # the 127.0.0.1 endpoint for hooks
 romm-shelf ui                        # full-screen UI (Firefox kiosk); starts the daemon
 romm-shelf shortcut [--plan]         # app menu entry + Steam non-Steam shortcut

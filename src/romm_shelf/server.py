@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from romm_shelf import bios, mods, sleep
+from romm_shelf import bios, mods, patches, sleep
 from romm_shelf.adapters import DiscReader, load_adapters
 from romm_shelf.auth import Session, load_session
 from romm_shelf.config import Settings
@@ -340,6 +340,41 @@ def create_app(settings: Settings | None = None, *, watch_sleep: bool = True) ->
         if not moved:
             raise HTTPException(404, "not on this device")
         return {"moved_to_backup": [str(dest) for _, dest in moved]}
+
+    # Patches (design.md § Patches): the same list as `romm-shelf patches`, applied
+    # and removed with the same plans as `hooks` and `external`.
+    @app.get("/api/patches")
+    def patches_list():
+        return [vars(p) for p in patches.status(shelf.settings, shelf.client)]
+
+    def run_patch(name: str, action: str) -> dict:
+        if shelf.running("patch", None):
+            raise HTTPException(409, "another patch is being applied")
+        if action == "remove" and name == "hooks":
+            raise HTTPException(409, "removing the hooks stops this daemon; run `romm-shelf hooks remove`")
+        job = shelf.start_job("patch", f"{action} {name}")
+        job["current"] = "downloading" if action == "apply" and name != "hooks" else action
+
+        def work():
+            try:
+                steps = patches.apply(shelf.settings, shelf.client, name) if action == "apply" \
+                    else patches.remove(shelf.settings, name)
+                job["log"] = [{"step": s, "error": None} for s in steps]
+                job.update(done=len(steps), total=len(steps))
+                shelf.end_job(job)
+            except (Exception, SystemExit) as e:  # plans refuse with SystemExit
+                logger.error("patch {} {}: {}", action, name, e)
+                shelf.end_job(job, str(e))
+        threading.Thread(target=work, daemon=True).start()
+        return job
+
+    @app.post("/api/patches/{name}/apply", status_code=202)
+    def patch_apply(name: str):
+        return run_patch(name, "apply")
+
+    @app.post("/api/patches/{name}/remove", status_code=202)
+    def patch_remove(name: str):
+        return run_patch(name, "remove")
 
     @app.get("/api/cover/{rom_id}")
     def cover(rom_id: int):

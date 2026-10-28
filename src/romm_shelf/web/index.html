@@ -36,6 +36,7 @@
     </div>
     <div class="tab" :class="{active: platform === ACTIVITY}" tabindex="0" data-nav @click="platform = ACTIVITY">
       Activity <q-spinner v-if="runningJobs.length" size="14px"></q-spinner></div>
+    <div class="tab" :class="{active: platform === PATCHES}" tabindex="0" data-nav @click="platform = PATCHES">Patches</div>
     <div class="tab" :class="{active: platform === BIOS}" tabindex="0" data-nav @click="platform = BIOS">BIOS</div>
   </div>
 
@@ -43,7 +44,7 @@
   <div v-else-if="error" class="q-pa-xl text-negative">{{ error }}</div>
   <div v-else-if="platform === ACTIVITY" class="bios" data-nav-group="grid" data-nav-up="tabs">
     <div v-if="!activity.length" class="q-pa-md text-grey-5">
-      Nothing yet. Installs, syncs (game start/end, sleep, uninstall) and BIOS downloads show up here.
+      Nothing yet. Installs, syncs (game start/end, sleep, uninstall), patches and BIOS downloads show up here.
     </div>
     <div v-for="j in activity" :key="j.id" class="q-mb-xs">
       <div class="bios-row" tabindex="0" data-nav @click="openJob[j.id] = !openJob[j.id]">
@@ -61,6 +62,34 @@
         <div v-for="(l, i) in j.log" :key="i" :class="{ 'text-negative': l.error }">
           {{ l.error ? "FAIL" : "ok" }} {{ l.step }}<span v-if="l.error">: {{ l.error }}</span></div>
         <div v-if="j.error" class="text-negative">{{ j.error }}</div>
+      </div>
+    </div>
+  </div>
+  <div v-else-if="platform === PATCHES" class="bios" data-nav-group="grid" data-nav-up="tabs">
+    <div v-if="patchesLoading" class="q-pa-xl text-center"><q-spinner size="48px"></q-spinner><div>Checking patches…</div></div>
+    <div v-if="patchMessage" class="q-pa-sm text-grey-4">{{ patchMessage }}</div>
+    <div v-for="p in patchList" :key="p.name" class="q-mb-md">
+      <div class="bios-row" style="cursor:default">
+        <q-badge :color="patchBadge(p).color" class="bios-badge">{{ patchBadge(p).label }}</q-badge>
+        <div class="col">
+          <div>{{ p.title }} <span class="text-grey-5">· {{ p.name }}</span></div>
+          <div class="text-grey-6" style="font-size:12px">{{ p.description }}</div>
+        </div>
+        <q-spinner v-if="patchBusy === p.name"></q-spinner>
+        <template v-else>
+          <q-btn v-if="p.state === 'not-applied' || p.state === 'update'" color="primary" unelevated dense class="q-px-md"
+                 data-nav :label="p.state === 'update' ? 'Update' : 'Apply'" @click="patchAct(p, 'apply')"></q-btn>
+          <q-btn v-if="p.removable.length && p.name !== 'hooks'" unelevated dense class="q-px-md" data-nav
+                 :color="confirmPatch === p.name ? 'negative' : 'grey-8'"
+                 :label="confirmPatch === p.name ? 'Press again to remove' : 'Remove'" @click="patchAct(p, 'remove')"></q-btn>
+        </template>
+      </div>
+      <div class="q-px-md text-grey-5" style="font-size:12px;font-family:monospace">
+        <div v-if="p.error" class="text-warning">{{ p.error }}</div>
+        <div v-for="line in (p.state === 'applied' ? [] : p.plan)" :key="line">{{ line }}</div>
+        <div v-if="confirmPatch === p.name" class="text-negative">
+          <div v-for="line in p.removable" :key="line">{{ line }}</div></div>
+        <div v-if="p.state !== 'applied' && !p.error">CLI: {{ p.cli }}</div>
       </div>
     </div>
   </div>
@@ -284,10 +313,58 @@ const app = createApp({
       elsewhere: { color: "positive", label: "found" },
       mismatch: { color: "warning", label: "wrong checksum" },
     })[f.local] || (f.on_romm ? { color: "primary", label: "on RomM" } : { color: "grey-8", label: "missing" });
-    Vue.watch(() => platform.value, (p) => { confirmBios.value = null; if (p === BIOS && !bios.value.length) loadBios(); });
+    // Patches tab (design.md § Patches): each change romm-shelf makes to the system,
+    // with the plan applying it would run now. Removing goes press-twice, showing what goes.
+    const PATCHES = "__patches";
+    const patchList = ref([]), patchesLoading = ref(false), patchBusy = ref(null), patchMessage = ref(null);
+    const confirmPatch = ref(null);
+    async function loadPatches() {
+      patchesLoading.value = true;
+      try {
+        const res = await fetch("/api/patches");
+        if (!res.ok) throw new Error(`patches: HTTP ${res.status}`);
+        patchList.value = await res.json();
+      } catch (e) { patchMessage.value = String(e); }
+      patchesLoading.value = false;
+      await nextTick();
+      if (!document.activeElement?.closest('[data-nav-group="grid"]'))
+        document.querySelector('[data-nav-group="grid"] [data-nav]')?.focus();
+    }
+    async function patchAct(p, action) {
+      if (patchBusy.value) return;
+      if (action === "remove" && confirmPatch.value !== p.name) { confirmPatch.value = p.name; return; }
+      confirmPatch.value = null; patchBusy.value = p.name; patchMessage.value = null;
+      const res = await fetch(`/api/patches/${p.name}/${action}`, { method: "POST" });
+      const job = await res.json();
+      if (!res.ok) { patchBusy.value = null; patchMessage.value = `Not done: ${job.detail}`; return; }
+      watchJobs();
+      while (true) {  // the job runs in the daemon; Activity has its log
+        await new Promise((r) => setTimeout(r, 500));
+        const j = activity.value.find((a) => a.id === job.id);
+        if (j && j.status !== "running") {
+          patchMessage.value = j.status === "done" ? `${action === "apply" ? "Applied" : "Removed"} ${p.name}. Restart ES-DE to pick it up.`
+                                                  : `Failed: ${j.error || "see Activity"}`;
+          break;
+        }
+      }
+      patchBusy.value = null;
+      await loadPatches();
+    }
+    const patchBadge = (p) => ({
+      applied: { color: "positive", label: "applied" },
+      update: { color: "primary", label: "update" },
+      "not-applied": { color: "grey-8", label: "not applied" },
+      blocked: { color: "warning", label: "blocked" },
+    })[p.state];
+
+    Vue.watch(() => platform.value, (p) => {
+      confirmBios.value = null; confirmPatch.value = null;
+      if (p === BIOS && !bios.value.length) loadBios();
+      if (p === PATCHES && !patchList.value.length) loadPatches();
+    });
 
     const platforms = computed(() => lib.value.platforms);
-    const tabs = computed(() => [...platforms.value.map((p) => p.slug), ACTIVITY, BIOS]);
+    const tabs = computed(() => [...platforms.value.map((p) => p.slug), ACTIVITY, PATCHES, BIOS]);
     const shown = computed(() => lib.value.roms.filter((r) => r.platform === platform.value));
 
     async function load(refresh = false) {
@@ -297,7 +374,7 @@ const app = createApp({
         if (!res.ok) throw new Error(`library: HTTP ${res.status}`);
         lib.value = await res.json();
         const withGames = lib.value.platforms.find((p) => p.on_device) || lib.value.platforms[0];
-        if (![BIOS, ACTIVITY].includes(platform.value) && !lib.value.platforms.some((p) => p.slug === platform.value)) platform.value = withGames?.slug;
+        if (![BIOS, ACTIVITY, PATCHES].includes(platform.value) && !lib.value.platforms.some((p) => p.slug === platform.value)) platform.value = withGames?.slug;
       } catch (e) { error.value = String(e); }
       loading.value = false;
       await nextTick(); focusFirst();
@@ -324,7 +401,8 @@ const app = createApp({
     window.addEventListener("nav-back", () => { detailOpen.value = false; });
     window.addEventListener("nav-refresh", () => {
       if (detailOpen.value) return;
-      platform.value === BIOS ? loadBios() : platform.value === ACTIVITY ? pollActivity() : load(true);
+      platform.value === BIOS ? loadBios() : platform.value === ACTIVITY ? pollActivity()
+        : platform.value === PATCHES ? loadPatches() : load(true);
     });
 
     const size = (b) => b > 1 << 30 ? `${(b / (1 << 30)).toFixed(1)} GB` : b > 1 << 20 ? `${(b / (1 << 20)).toFixed(1)} MB` : `${Math.ceil(b / 1024)} KB`;
@@ -336,6 +414,7 @@ const app = createApp({
              jobs, job, message, busy, confirmRemove, install, uninstall, pct,
              BIOS, bios, biosLoading, biosBusy, biosMessage, confirmBios, biosGet, biosAct, gettable, summary, badge,
              expanded, unavailable, visible,
+             PATCHES, patchList, patchesLoading, patchBusy, patchMessage, confirmPatch, patchAct, patchBadge,
              ACTIVITY, activity, openJob, runningJobs, jobColor, jobDetail, ago };
   },
 });

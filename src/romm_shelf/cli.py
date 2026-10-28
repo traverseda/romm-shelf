@@ -15,7 +15,7 @@ from romm_shelf.auth import device_login, load_session, save_credentials
 from romm_shelf.config import Settings
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import match, scan_local
-from romm_shelf import bios, external, hooks, mods
+from romm_shelf import bios, external, hooks, mods, patches
 from romm_shelf.service import rom_for_path, sync_roms
 from romm_shelf.sync import inventory, negotiate_payload
 
@@ -371,8 +371,18 @@ hooks_app = typer.Typer(no_args_is_help=True, help="ES-DE hooks and the daemon's
 app.add_typer(hooks_app, name="hooks")
 
 
-def _default_exec_start() -> str:
-    return f"{Path(sys.argv[0]).resolve()} serve"
+@app.command("patches")
+def patches_list():
+    """What romm-shelf changes on this system (ES-DE hooks, external emulators), and whether each is applied."""
+    settings = Settings()
+    for p in patches.status(settings, load_session(settings).client()):
+        typer.echo(f"{p.state:12} {p.name:10} {p.title}")
+        for line in p.plan if p.state != "applied" else []:
+            typer.echo(f"    {line}")
+        if p.error:
+            typer.echo(f"    # {p.error}")
+        elif p.state != "applied":
+            typer.echo(f"    # apply with: {p.cli}")
 
 
 @hooks_app.command("install")
@@ -381,7 +391,7 @@ def hooks_install(
     exec_start: Annotated[str | None, typer.Option(help="Command systemd runs for the daemon")] = None,
 ):
     """Install the ES-DE game-start/game-end scripts and the daemon's user unit."""
-    changes = hooks.install_plan(Settings(), exec_start or _default_exec_start())
+    changes = hooks.install_plan(Settings(), exec_start or patches.default_exec_start())
     for c in changes:
         typer.echo(c.describe())
     if not plan:
