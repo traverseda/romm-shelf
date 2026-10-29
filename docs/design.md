@@ -137,6 +137,7 @@ GameCube or Wii ROM.
 | `dolphin`, Wii | `saves/wii/dolphin/title/<type>/<hex id>/data/`, a folder | disc header (RVZ/WIA, WBFS, ISO) | `nand:<type>` |
 | `dolphin`, mods | Pulsar saves in `shared2/Pulsar/<patch id>/`, and Riivolution save folders inside the patch folder | from the installed descriptor and its XML | `pulsar:<id>`, `riivolution:<path>` |
 | `eden` | `saves/switch/eden/nand/user/save/0000000000000000/<profile>/<title id>/`, a folder | `[title id]` in the file name, or the ticket name in an NSP's header | `account`, `device` |
+| `pcsx2` | `saves/ps2/pcsx2/memcards/<card>.ps2/<B?><serial>…/`, one folder each, on a folder memory card | RomM's `title_id` (the disc serial, read by RomM on scan), with the region prefix `BA`/`BE`/`BI` as Argosy derives it | `mcd:<folder name>` |
 
 Where a save goes on a device that has never had it: from the slot and the game
 ID, never from RomM's stored file name (RomM renames uploads). An Eden save goes
@@ -147,7 +148,8 @@ Mod saves belong to the mod's ROM. Mario Kart Wii's own NAND save belongs to the
 base disc, which every mod reads too.
 
 **Shared memory cards** don't fit RomM's one-save-per-ROM model. In phase 1 they
-are not synced. The UI must say so per game rather than silently skipping them.
+are not synced. PCSX2 is synced once its card is converted to a folder card, which holds one
+folder per save. The UI must say so per game rather than silently skipping them.
 See [todo.md](../todo.md).
 
 ## Library matching

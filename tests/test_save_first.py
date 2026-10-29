@@ -1,4 +1,4 @@
-"""Saves found from the save side: Dolphin and Eden (design.md § Finding saves from the save side)."""
+"""Saves found from the save side: Dolphin, Eden and PCSX2 (design.md § Finding saves from the save side)."""
 
 import io
 import json
@@ -16,6 +16,7 @@ from romm_shelf.romm import NegotiateResponse, Rom, SyncOperation
 from romm_shelf.sync import inventory
 from romm_shelf_dolphin import DolphinAdapter, disc_id
 from romm_shelf_eden import EdenAdapter, nsp_title, title_id
+from romm_shelf_pcsx2 import Pcsx2Adapter, save_prefix
 from tests.conftest import touch
 
 PROFILE = "E95961959DDEF144A9CF1F2DF24DA77D"
@@ -215,3 +216,40 @@ def test_plan_restores_a_save_for_a_game_that_isnt_installed(layout):
     [step] = plan_saves(resp, inv, {}, {"dolphin": adapter}, layout,
                         restore=lambda op, a: a.restore_path(r, layout, reader, op.slot), roms={2: r})
     assert step.path == layout.saves / "wii/dolphin/title/00010004/524d4345/data" and step.rom.id == 2
+
+
+def test_ps2_save_prefix_from_title_id():
+    assert save_prefix("SLUS-20624") == "BASLUS20624"
+    assert save_prefix("SCES-50916") == "BESCES50916"
+    assert save_prefix("SCPS-15037") == "BISCPS15037"
+    assert save_prefix(None) is None
+    assert save_prefix("0100F2C0115B6000") is None  # not a PS2 serial
+
+
+def test_pcsx2_pairs_card_folders_by_romm_title_id(layout):
+    card = layout.saves / "ps2/pcsx2/memcards/Mcd001_converted.ps2"
+    touch(card / "_pcsx2_superblock")
+    for name in ("BASLUS-20624Save1", "BASLUS-20624Save2", "BASCUS-97316YAOTWTD!", "BASLUS-99999X"):
+        touch(card / name / "icon.sys")
+    touch(layout.saves / "ps2/pcsx2/memcards/Mcd002.ps2")  # a shared file card: not synced
+    remote = [rom(1033, "ps2", "Simpsons.chd", title_id="SLUS-20624"),
+              rom(1034, "ps2", "Sly 2.chd", title_id="SCUS-97316"),
+              rom(1384, "ps2", "Vice City.iso")]  # RomM has no title_id for it
+    paired, unmatched = Pcsx2Adapter().discover(remote, layout, DiscReader(None, {}))
+    assert {(r.id, s.slot) for r, s in paired} == {(1033, "mcd:BASLUS-20624Save1"), (1033, "mcd:BASLUS-20624Save2"),
+                                                    (1034, "mcd:BASCUS-97316YAOTWTD!")}
+    assert [s.path.name for s in unmatched] == ["BASLUS-99999X"]
+    assert all(s.file_name == f"{s.path.name}.zip" for _, s in paired)
+
+
+def test_pcsx2_restores_only_into_one_card_and_its_own_folders(layout):
+    a, r = Pcsx2Adapter(), rom(1033, "ps2", "Simpsons.chd", title_id="SLUS-20624")
+    reader = DiscReader(None, {})
+    assert a.restore_path(r, layout, reader, "mcd:BASLUS-20624Save1") is None  # no folder card yet
+    card = layout.saves / "ps2/pcsx2/memcards/Mcd001_converted.ps2"
+    touch(card / "_pcsx2_superblock")
+    assert a.restore_path(r, layout, reader, "mcd:BASLUS-20624Save1") == card / "BASLUS-20624Save1"
+    assert a.restore_path(r, layout, reader, "mcd:../../BASLUS-20624Save1") == card / "BASLUS-20624Save1"
+    assert a.restore_path(r, layout, reader, "mcd:BASCUS-97316YAOTWTD!") is None  # another game's folder
+    touch(layout.saves / "ps2/pcsx2/memcards/Other.ps2/_pcsx2_superblock")
+    assert a.restore_path(r, layout, reader, "mcd:BASLUS-20624Save1") is None  # two cards: don't guess

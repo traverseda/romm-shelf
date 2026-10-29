@@ -26,6 +26,7 @@ romm-shelf = "romm_shelf.cli:app"
 retroarch = "romm_shelf_retroarch:RetroArchAdapter"
 dolphin = "romm_shelf_dolphin:DolphinAdapter"
 eden = "romm_shelf_eden:EdenAdapter"
+pcsx2 = "romm_shelf_pcsx2:Pcsx2Adapter"
 
 [project.entry-points."romm_shelf.externals"]
 eden = "romm_shelf_eden:EDEN"
@@ -38,7 +39,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/romm_shelf", "src/romm_shelf_retroarch", "src/romm_shelf_dolphin", "src/romm_shelf_eden"]
+packages = ["src/romm_shelf", "src/romm_shelf_retroarch", "src/romm_shelf_dolphin", "src/romm_shelf_eden", "src/romm_shelf_pcsx2"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

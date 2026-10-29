@@ -38,6 +38,8 @@ class Rom(_Model):
     fs_size_bytes: int
     name: str | None = None
     md5_hash: str | None = None
+    title_id: str | None = None
+    """RomM's platform-native ID read from the ROM on scan, e.g. SLUS-20624 for a PS2 disc."""
     summary: str | None = None
     has_multiple_files: bool = False
     has_nested_single_file: bool = False
