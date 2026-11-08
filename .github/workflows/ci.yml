@@ -53,10 +53,26 @@ jobs:
       # and image need considerably more.
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          docker image prune -af || true
-          sudo apt-get clean
           df -h /
+          docker system df || true
+          # GitHub's ubuntu image ships these toolchains on the same root
+          # filesystem Docker and the Nix store use. Only CodeQL from the tool
+          # cache is removed; Node and Python there are still needed by actions.
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/powershell \
+            /usr/share/swift \
+            /usr/lib/jvm \
+            /opt/microsoft \
+            /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          docker image prune -af || true
+          docker builder prune -af || true
+          df -h /
+          docker system df || true
 
       - uses: cachix/install-nix-action@v31
         with:
