@@ -2,9 +2,9 @@
 # Build the romm-shelf streaming image on top of RomM's webstation image
 # (notes-deployment.md § Route 5).
 #
-# It builds the wheel and the all-in-one emulator bundle, stages both in
-# dist/docker-context (the bundle's Nix store closure included, so its
-# absolute /nix/store paths keep working), and runs docker buildx.
+# It builds the wheel and stages it in dist/docker-context with the container
+# entrypoint. Emulators are not baked in: the entrypoint installs the same GHCR
+# packs the AppImage uses, named by ROMM_SHELF_PACKS_AUTO.
 #
 #   scripts/build-docker.sh --plan        print the commands and inputs
 #   scripts/build-docker.sh              build romm-shelf-webstation:<version>
@@ -48,7 +48,6 @@ fi
 
 CONTEXT=$DIST_DIR/docker-context
 WHEEL_DIR=$DIST_DIR/docker-wheels
-EMULATOR_LINK=$DIST_DIR/emulators
 WHEEL=$WHEEL_DIR/romm_shelf-$VERSION-py3-none-any.whl
 DOCKER_OUTPUT=(--load)
 if (( CACHE_ONLY )); then
@@ -58,8 +57,6 @@ elif (( PUSH )); then
 fi
 
 require uv
-require nix
-require nix-store
 require docker
 
 if (( PLAN )); then
@@ -70,7 +67,7 @@ Docker streaming image plan (changes nothing)
   tags:            ${TAGS[*]}
   version:         $VERSION
   wheel:           $WHEEL
-  emulator bundle: $EMULATOR_LINK (all bundled emulators)
+  emulators:       from GHCR packs at runtime (ROMM_SHELF_PACKS_AUTO)
   context:         $CONTEXT
   output:          ${DOCKER_OUTPUT[*]}
 Commands:
@@ -79,45 +76,33 @@ fi
 
 run mkdir -p "$WHEEL_DIR"
 run uv build --wheel --out-dir "$WHEEL_DIR"
-run nix build "path:$REPO_ROOT#emulators" -o "$EMULATOR_LINK"
 
 if (( PLAN )); then
-  plan_note "  + emulators=\$(readlink -f $EMULATOR_LINK)"
-  plan_note "  + chmod -R u+w $CONTEXT 2>/dev/null || true; rm -rf $CONTEXT; mkdir -p $CONTEXT/nix/store $CONTEXT/wheels"
+  plan_note "  + rm -rf $CONTEXT; mkdir -p $CONTEXT/wheels"
   plan_note "  + cp $WHEEL $CONTEXT/wheels/"
-  plan_note "  + while read p; do cp -a --reflink=auto \"\$p\" $CONTEXT/nix/store/; done < <(nix-store -qR \"\$emulators\")"
-  plan_note "  + chmod -R u+w $CONTEXT/nix"
+  plan_note "  + cp $REPO_ROOT/packaging/docker/entrypoint.sh $CONTEXT/"
   printf '  + docker buildx build --platform linux/amd64 -f %q ' \
     "$REPO_ROOT/packaging/docker/Dockerfile"
   for tag in "${TAGS[@]}"; do
     printf -- '-t %q ' "$IMAGE:$tag"
   done
-  printf -- '--build-arg BASE_IMAGE=%q --build-arg EMULATORS_PATH=%q ' \
-    "$BASE_IMAGE" '<emulator-store-path>'
+  printf -- '--build-arg BASE_IMAGE=%q ' "$BASE_IMAGE"
   printf -- '--build-arg ROMM_SHELF_VERSION=%q ' "$VERSION"
   printf '%s %q\n' "${DOCKER_OUTPUT[*]}" "$CONTEXT"
   exit 0
 fi
 
-EMULATORS_PATH=$(readlink -f "$EMULATOR_LINK")
-[ -d "$EMULATORS_PATH" ] || die "no emulator bundle at $EMULATOR_LINK"
 [ -f "$WHEEL" ] || die "no wheel at $WHEEL"
 
-chmod -R u+w "$CONTEXT" 2>/dev/null || true
 rm -rf "$CONTEXT"
-mkdir -p "$CONTEXT/nix/store" "$CONTEXT/wheels"
+mkdir -p "$CONTEXT/wheels"
 cp -a --reflink=auto "$WHEEL" "$CONTEXT/wheels/"
-while IFS= read -r path; do
-  cp -a --reflink=auto "$path" "$CONTEXT/nix/store/"
-done < <(nix-store --query --requisites "$EMULATORS_PATH")
-# The store is read-only; keep the staged copy removable and copyable.
-chmod -R u+w "$CONTEXT/nix"
+cp "$REPO_ROOT/packaging/docker/entrypoint.sh" "$CONTEXT/"
 
 DOCKER_ARGS=(
   --platform linux/amd64
   -f "$REPO_ROOT/packaging/docker/Dockerfile"
   --build-arg "BASE_IMAGE=$BASE_IMAGE"
-  --build-arg "EMULATORS_PATH=$EMULATORS_PATH"
   --build-arg "ROMM_SHELF_VERSION=$VERSION"
 )
 for tag in "${TAGS[@]}"; do

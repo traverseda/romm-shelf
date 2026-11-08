@@ -11,7 +11,7 @@ romm-shelf is deployed six ways:
 | NixOS | flake package | from `/nix/store` | a real NixOS system |
 | AppImage | self-updating AppImage | bundled | Steam Deck, plain Linux |
 | uv / PyPI | wheel + sdist | external or RetroDECK | a checkout, a Python user |
-| Docker | OCI image | bundled | RomM's streaming webstation |
+| Docker | OCI image | GHCR packs | RomM's streaming webstation |
 | WSL2 | AppImage + packs | from GHCR packs | Windows, with WSLg's vGPU |
 
 The routes share one build rule: **GitHub Actions installs tools and calls build
@@ -133,7 +133,7 @@ The same flake package, added declaratively:
 The primary Deck route (design.md § Distribution). One file, fixed name, all
 emulators inside.
 
-**Install (proposed; see todo.md):**
+**Install** (decided 2026-11-08, see todo.md):
 
 ```
 mkdir -p ~/Applications
@@ -144,13 +144,15 @@ install -m 0755 romm-shelf-<version>-x86_64.AppImage ~/Applications/romm-shelf.A
 A fixed name matters: `config.program()` records `$APPIMAGE`, so units,
 desktop entries and Steam shortcuts survive an update.
 
-**Update:** `romm-shelf update` (new command, to build).
+**Update:** `romm-shelf update` (implemented 2026-11-08).
 
 - `--check` prints the installed and available versions.
 - `--plan` prints the URL, version, SHA-256 and destination; changes nothing.
-- `--yes` downloads to `$APPIMAGE.new`, verifies SHA-256, chmods 0755 and
-  atomically replaces the file. The running process keeps the old inode until it
-  exits, so replacing the file is safe.
+- `--yes` downloads to `$APPIMAGE.new`, verifies SHA-256, chmods 0755, copies
+  the current file to `$APPIMAGE.previous` (kept once, so this is the one
+  rollback generation) and atomically replaces the file. The running process
+  keeps the old inode until it exits, so replacing the file is safe.
+- `--rollback` swaps `$APPIMAGE` and `$APPIMAGE.previous` back.
 - Refuses when not running from an AppImage, and prints the right command for a
   Nix/uv install instead.
 - A UI Settings action needs the same CLI commands (CLI/UI parity).
@@ -177,15 +179,24 @@ https://github.com/<owner>/romm-shelf/releases/latest/download/latest.json
   "appimage": {
     "url": "https://github.com/<owner>/romm-shelf/releases/download/v0.2.0/romm-shelf-0.2.0-x86_64.AppImage",
     "sha256": "<hex>",
-    "size": 1900000000
+    "size": 60000000
+  },
+  "packs": {
+    "retroarch": {
+      "image": "ghcr.io/<owner>/romm-shelf-pack-retroarch",
+      "digest": "sha256:<hex>",
+      "version": "1.22.2",
+      "size": 1600000000,
+      "min_core": "0.2.0"
+    }
   },
   "released_at": "2026-11-07T12:00:00Z"
 }
 ```
 
 `romm-shelf update` compares `latest.json`'s `version` with `romm_shelf.__version__`.
-Prereleases are release assets too; the stable updater follows
-`releases/latest`, and a `--channel` option is an open decision.
+Decided 2026-11-08: **stable only** — the updater follows `releases/latest`,
+which GitHub keeps prerelease-free; there is no prerelease channel.
 
 **Two AppImage builders, one taken.** As of 2026-11-08 `.#appimage` is the
 no-chroot `packaging/appimage.nix` build: relocatable Python and wheels, static
@@ -250,7 +261,7 @@ lscr.io/linuxserver/webstation:romm
   + Selkies desktop, nginx, room UI        (upstream)
   + webstation-broker                      (upstream)
   + romm-shelf wheel                       (ours)
-  + bundled emulators                      (ours)
+  + emulator packs from GHCR               (ours, shared with the AppImage)
   + a generic "romm-shelf" broker launcher (small patch/fork, preferably upstreamed)
 ```
 
@@ -267,13 +278,15 @@ UI, save archives, state screenshots and the import/export contract.
 
 `packaging/docker/Dockerfile` extends the upstream image, installs the
 romm-shelf wheel into its own venv at `/opt/romm-shelf/venv` so the broker's
-system Python is untouched, and copies the all-in-one Nix emulator bundle with
-its store closure into `/nix`. `scripts/build-docker.sh --plan` prints the
-build; without `--plan` it stages `dist/docker-context` and runs buildx for
-linux/amd64. The finished image is about 20 GB, mostly the upstream base plus
-the 6 GB emulator closure. `--cache-only` builds without exporting that image,
-which is how CI avoids the runner disk. The broker launcher integration is
-still open (todo.md).
+system Python is untouched, and adds an entrypoint that installs emulator packs
+from the same GHCR images the AppImage uses. `ROMM_SHELF_PACKS_AUTO` is a
+comma-separated pack list (empty by default, because the v1 pack set is still an
+owner decision); the cache lives in `/config` and survives container updates.
+`scripts/build-docker.sh --plan` prints the build; without `--plan` it stages
+`dist/docker-context` and runs buildx for linux/amd64. The image no longer
+carries the emulator closure, so it stays close to the upstream base size.
+`--cache-only` builds without exporting the image, which is how CI avoids the
+runner disk. The broker launcher integration is still open (todo.md).
 
 ### Container contract
 
@@ -290,6 +303,8 @@ services:
       - TZ=Etc/UTC
       - SUBFOLDER=/streaming/
       - BROKER_SECRET=${STREAMING_BROKER_SECRET:?set me}
+      # Comma-separated emulator packs from GHCR; empty installs none.
+      - ROMM_SHELF_PACKS_AUTO=retroarch,dolphin,pcsx2,ppsspp,rpcs3,azahar,cemu
     devices:
       - /dev/dri:/dev/dri
     volumes:
@@ -434,15 +449,17 @@ scripts/test.sh             uv sync --frozen; uv run pytest -m "not live"
 scripts/build-wheel.sh      uv build --wheel --sdist --out-dir dist
 scripts/build-nix.sh        nix build .#romm-shelf; optionally nix flake check
 scripts/build-emulators.sh  nix build .#emulators (bundle; for smoke tests)
-scripts/build-appimage.sh   nix build .#appimage (or path:.#appimage); copy to dist
+scripts/build-appimage.sh   nix build .#appimage; copy to dist
+scripts/build-packs.sh      nix build .#pack-<name>; copy image tarballs to dist
+scripts/publish-packs.sh    skopeo copy each pack to GHCR; verify its digest
 scripts/build-docker.sh     docker buildx build; tag; optional --push
 scripts/release.sh          test + all builds + SHA256SUMS + latest.json
 ```
 
-`scripts/build-appimage.sh` takes `APPIMAGE_BUILDER` (default: whatever
-`flake.nix` currently exposes) so the nix-appimage/no-chroot decision does not
-change the CI workflow. `scripts/release.sh` checks that the tag, `pyproject.toml`
-and `src/romm_shelf/__init__.py` agree on the version.
+`scripts/build-appimage.sh` takes `APPIMAGE_BUILDER` (`appimage` by default,
+`appimage-fat` for the fallback) so the builder choice does not change the CI
+workflow. `scripts/release.sh` checks that the tag, `pyproject.toml` and
+`src/romm_shelf/__init__.py` agree on the version.
 
 ### Versioning and artifacts
 
@@ -467,8 +484,8 @@ or a pull request labelled `build-docker`. It caches `/nix/store` and frees
 runner disk first. A push to `main`, a `v*` tag, or a manual dispatch publishes
 the image with `scripts/publish-docker.sh` to
 `ghcr.io/<owner>/<repo>-webstation`; other branch pushes build with
-`--cache-only` so the ~20 GB image stays off the runner. The release workflow
-below is still to add.
+`--cache-only`. The core AppImage is built on `main`, tags and manual dispatch.
+`.github/workflows/release.yml` runs on a `v*` tag.
 
 **`.github/workflows/ci.yml`** — push and pull request:
 
@@ -484,36 +501,39 @@ below is still to add.
 
 **`.github/workflows/release.yml`** — tag `v*`:
 
-1. `scripts/release.sh`
-2. create the GitHub Release with the AppImage, wheel, sdist, `SHA256SUMS` and
+1. `scripts/release.sh` (test, wheel/sdist, AppImage, packs, `SHA256SUMS`,
+   `latest.json`)
+2. `scripts/publish-packs.sh` (GHCR, then verify each registry digest)
+3. create the GitHub Release with the AppImage, wheel, sdist, `SHA256SUMS` and
    `latest.json`
-3. publish the wheel/sdist with PyPI trusted publishing
-4. `scripts/build-docker.sh --push` to GHCR
+4. publish the wheel/sdist with PyPI trusted publishing
+
+The streaming image is published by `ci.yml` on the same tag; it pulls packs at
+runtime, so it does not need `latest.json` at build time.
 
 The workflows install Nix (and its cache), Docker and `uv`; they do not run
 `nix build`, `uv build` or `docker build` directly.
 
-**Caching.** The emulator closure is about 6.0 GB and the AppImage about 1.8 GB.
-A binary cache is not optional for a usable CI:
+**Caching.** The pack set is about 6.0 GB in total and the core AppImage about
+59 MB (the fat fallback about 1.8 GB). A binary cache is not optional for a
+usable CI:
 
 - Cachix (or an equivalent Nix binary cache) for the Nix derivations; or
 - `nix-community/cache-nix-action` with the GitHub Actions cache, which is
   smaller but free.
 
-GitHub-hosted runners have about 14 GB free. Building the whole emulator closure
-plus the AppImage plus Docker on one runner can fill that. Mitigations: build
-AppImage/Docker only on `main` and tags, free disk space before the build, use a
-larger runner, or a self-hosted runner. The exact choice is a CI decision, not a
-code change.
+GitHub-hosted runners have about 14 GB free. Building every pack, the AppImage
+and Docker on one runner can fill that. Mitigations: build AppImage/Docker only
+on `main` and tags, free disk space before the build, use a larger runner, or a
+self-hosted runner.
 
-**Release limits.** GitHub release assets are capped at 2 GB each; the current
-AppImage is about 1.8 GB. GHCR is the right home for the Docker image (not a
-release asset), and the AppImage payload decision above must be settled before
-the first release.
+**Release limits.** GitHub release assets are capped at 2 GB each; the core
+AppImage is well under that. Packs and the Docker image live in GHCR, not in
+release assets.
 
-**Prerequisite:** there is no `origin` remote configured in this checkout. GitHub
-Actions cannot run until the repository is pushed to GitHub and the workflows are
-on the default branch.
+**Prerequisite:** the workflows need the repository on GitHub with Actions
+enabled, and the GHCR packages public after their first publish for anonymous
+pulls (todo.md).
 
 ### AppImage self-update protocol
 
@@ -530,9 +550,9 @@ same code path as the CLI:
 8. `chmod 0755`; `os.replace(temp, $APPIMAGE)`.
 9. Print "restart romm-shelf/Steam to use <version>".
 
-A rollback (`--rollback`) is desirable but is an open decision: it needs the old
-file kept somewhere (`$APPIMAGE.previous` beside the AppImage is the simplest).
-The UI Settings action must call the same core function.
+`--rollback` swaps `$APPIMAGE` and `$APPIMAGE.previous` back; the updater keeps
+one previous generation. The UI Settings action must call the same core
+function.
 
 ## Release checklist
 
@@ -545,11 +565,14 @@ The UI Settings action must call the same core function.
    `romm-shelf --help` works.
 6. AppImage runs on azrael with no `/nix` on the host (for the no-chroot builder)
    and `romm-shelf --help` works.
-7. Docker image starts, `GET /api/health` answers, and a RomM streaming session
-   launches one bundled emulator end to end.
-8. Deck smoke test: AppImage install, `romm-shelf ui`, one game, save upload and
+7. Packs publish to GHCR and pull anonymously; the Deck installs one and plays a
+   game from it.
+8. Docker image starts, `GET /api/health` answers, `ROMM_SHELF_PACKS_AUTO`
+   installs a pack, and a RomM streaming session launches one emulator end to
+   end.
+9. Deck smoke test: AppImage install, `romm-shelf ui`, one game, save upload and
    restore; `romm-shelf update --check` sees the new release.
-9. Release notes call out DB/schema, config and save-compatibility changes.
+10. Release notes call out DB/schema, config and save-compatibility changes.
 
 ## Open decisions
 

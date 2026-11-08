@@ -1,11 +1,12 @@
 # GHCR emulator packs
 
-*Written 2026-11-08. Status: the client half is implemented — `src/romm_shelf/packs.py`,
-`romm-shelf packs`, pack-backed `play` under bwrap, and the core no-chroot
-AppImage. The containers themselves (`packaging/packs.nix`, publish scripts) and a
-Deck spike are still to do, so this is not yet a contract.
-[docs/design.md](docs/design.md) still governs behaviour; this file is the plan for
-moving emulators out of the AppImage and into OCI images on GHCR.*
+*Written 2026-11-08. Status: implemented in the tree — `src/romm_shelf/packs.py`,
+`romm-shelf packs`, pack-backed `play` under bwrap, the core no-chroot AppImage,
+`packaging/packs.nix`, the build/publish/release scripts and the tag-driven
+release workflow. The remaining work is a Deck spike (pull and play) and making
+the published GHCR packages public; this is still not a contract until those are
+done. [docs/design.md](docs/design.md) governs behaviour; this file records how
+packs work and why.*
 
 ## Why this exists
 
@@ -267,39 +268,37 @@ is the only runtime metadata needed.
 packages.${system} = {
   default = romm-shelf;
   romm-shelf = ...;
-  emulators = ...;                 # all-in-one, for Nix and Docker
+  emulators = ...;                 # all-in-one, for Nix and a checkout
   appimage = ...;                  # small core AppImage (packaging/appimage.nix)
-  packs = {
-    retroarch = ...;
-    dolphin = ...;
-    pcsx2 = ...;
-    ppsspp = ...;
-    rpcs3 = ...;
-    azahar = ...;
-    cemu = ...;
-    eden = ...;
-  };
+  pack-retroarch = ...;
+  pack-dolphin = ...;
+  pack-pcsx2 = ...;
+  pack-ppsspp = ...;
+  pack-rpcs3 = ...;
+  pack-azahar = ...;
+  pack-cemu = ...;
+  pack-eden = ...;
 };
 ```
 
-The flake currently uses `nix-appimage` for `.#appimage`. This plan switches the
-core AppImage to the no-chroot `packaging/appimage.nix`, because it no longer
-contains emulators. `nix-appimage` can remain for a temporary fat fallback, or be
-removed once the core AppImage is proven.
+The flake now exposes both: `.#appimage` is the core no-chroot
+`packaging/appimage.nix` build, and `.#pack-<name>` is one OCI image per
+emulator (`packaging/packs.nix`). `.#appimage-fat` remains the temporary
+all-in-one fallback.
 
 ### Scripts
 
 ```
 scripts/build-appimage.sh     build the core AppImage, copy to dist/
-scripts/build-packs.sh        nix build .#packs.<name>, copy image tarballs to dist/
-scripts/publish-packs.sh      skopeo copy each image to GHCR; print digests
+scripts/build-packs.sh        nix build .#pack-<name>, copy image tarballs to dist/
+scripts/publish-packs.sh      skopeo copy each image to GHCR; verify digests
 scripts/release.sh            test + appimage + wheel + packs + SHA256SUMS + latest.json
 ```
 
 `scripts/publish-packs.sh` uses `skopeo`:
 
 ```
-skopeo copy docker-archive:dist/romm-shelf-pack-retroarch.tar \
+skopeo copy docker-archive:dist/romm-shelf-pack-retroarch.tar.gz \
   docker://ghcr.io/<owner>/romm-shelf-pack-retroarch:<version>
 skopeo inspect docker://ghcr.io/<owner>/romm-shelf-pack-retroarch:<version> \
   --format '{{.Digest}}'
@@ -444,21 +443,13 @@ update separately through the pack manager.
 ## Release and CI
 
 `latest.json` lives in GitHub Releases. It carries the core AppImage and the
-pinned pack digests. The release workflow:
-
-1. `scripts/test.sh`
-2. `scripts/build-wheel.sh`
-3. `scripts/build-appimage.sh`
-4. `scripts/build-packs.sh`
-5. `scripts/publish-packs.sh` (GHCR push, print digests)
-6. `scripts/release.sh` (checksums, `latest.json`)
-7. create the GitHub Release
-8. publish PyPI wheel/sdist
-9. attach the core AppImage, wheel, sdist, `SHA256SUMS`, `latest.json`
-
-CI (`ci.yml`) runs tests and the wheel on every PR; core AppImage on `main` and
-tags; packs on `main` and tags (pack builds are large and cached by Nix). The
-workflows only install tools and call scripts.
+pinned pack digests. `.github/workflows/release.yml` on a `v*` tag runs
+`scripts/release.sh` (tests, wheel, AppImage, packs, `SHA256SUMS`,
+`latest.json`), then `scripts/publish-packs.sh` pushes and verifies the GHCR
+digests, then creates the GitHub Release and publishes PyPI. `ci.yml` builds the
+core AppImage on `main`, tags and manual dispatch; the streaming image is built
+there too, and installs packs at runtime. The workflows only install tools and
+call scripts.
 
 GHCR requirements:
 
@@ -532,22 +523,20 @@ path that bwrap hides.
 - `maxLayers` and grouping; whether `nix2container` replaces `buildLayeredImage`.
 - Prune policy: manual only, or automatic after updates.
 - Whether a fat AppImage remains as an offline/air-gapped option.
-- Docker streaming image: keep the all-in-one bundle, or build it from the pack
-  images.
 - GHCR package visibility automation after the first publish.
 
 ## Effects on the existing docs
 
-When the spike passes and this is implemented:
+Implemented 2026-11-08:
 
-- `docs/design.md` § Distribution changes from "emulators inside the AppImage" to
-  "core AppImage + GHCR emulator packs."
-- `docs/design.md` § Bundled emulators changes the source of emulators for the
-  AppImage route; Nix still gets the all-in-one bundle.
-- `notes-deployment.md` Route 3 (AppImage), Route 5 (Docker), the build-script
-  section and the release checklist need the pack split.
-- `README.md` gets install/update instructions for packs.
-- `todo.md` records the open decisions above.
+- `docs/design.md` § Distribution now says "core AppImage + GHCR emulator packs."
+- `docs/design.md` § Bundled emulators makes the AppImage and the streaming image
+  use packs; Nix and a checkout still get the all-in-one bundle.
+- `notes-deployment.md` Routes 3 and 5, the build-script section and the release
+  checklist describe the pack split.
+- `README.md` is pre-release and points at the design; install/update instructions
+  for packs still need a pass once the Deck spike passes.
+- `todo.md` records the remaining open decisions.
 
 ## Appendix: GHCR/OCI details
 

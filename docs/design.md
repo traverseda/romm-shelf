@@ -128,9 +128,13 @@ Deck and running it with uv.*
 - **Tested** on azrael (NixOS, run with binfmt's `appimage-run` bypassed, as on
   any other distro): `--help` in 1.2 s, and `shortcut --plan` records the
   AppImage's path. Not yet run on the Deck.
-- **Open:** where the file lives on the device and how a newer one arrives; pack
-  update cadence, signing and a bwrap/user-namespace fallback. See todo.md,
-  together with turning patches into scripts.
+- **Place and updates** (decided 2026-11-08): a fixed
+  `~/Applications/romm-shelf.AppImage`, so units and shortcuts survive; updates
+  come from GitHub Releases (`releases/latest/download/latest.json`), stable only
+  (no prerelease channel), and the previous file is kept once for
+  `romm-shelf update --rollback`.
+- **Open:** pack update cadence, signing and a bwrap/user-namespace fallback.
+  See todo.md, together with turning patches into scripts.
 
 ## Core and plugins
 
@@ -501,9 +505,10 @@ roms/switch/BotW [01007EF00011E000]/        in RomM
 *Decided 2026-11-07 (owner): romm-shelf bundles its own emulators and replaces
 RetroDECK. RetroArch with libretro cores comes first, for the basic systems (NES
 first), but standalone emulators are supported the same way. The Nix package and a
-checkout use one all-in-one bundle; the AppImage pulls one pack per emulator from
-GHCR (design.md § Distribution). A game launches from its own Steam shortcut
-through `romm-shelf play`. Being built; nothing below runs on the Deck yet.*
+checkout use one all-in-one bundle; the AppImage and the streaming image pull one
+pack per emulator from GHCR (design.md § Distribution). A game launches from its
+own Steam shortcut through `romm-shelf play`. Being built; nothing below runs on
+the Deck yet.*
 
 - **One model for every emulator.** An `Emulator` (`emulators.py`) names the RomM
   platforms it runs and turns an installed game into a run plan: program,
@@ -521,10 +526,11 @@ through `romm-shelf play`. Being built; nothing below runs on the Deck yet.*
   RetroArch 1.22.2 unpacked from libretro's own Linux AppImage, and the cores
   romm-shelf uses, plus the standalone emulators. They are passed in through
   `ROMM_SHELF_EMULATORS` (the Nix wrapper sets it; a checkout points it at
-  `nix build .#emulators`). The AppImage instead installs packs: each pack carries
-  the same `retroarch/`, `dolphin/`, … layout, and `play` wraps it in `bwrap` so the
-  pack's store is at `/nix`. Explicit `ROMM_SHELF_EMULATORS` or a checkout always
-  wins over a pack.
+  `nix build .#emulators`). The AppImage and the streaming image instead install
+  packs from GHCR: each pack carries the same `retroarch/`, `dolphin/`, … layout,
+  and `play` wraps it in `bwrap` so the pack's store is at `/nix`. The streaming
+  container installs `ROMM_SHELF_PACKS_AUTO` at startup. Explicit
+  `ROMM_SHELF_EMULATORS` or a checkout always wins over a pack.
 - **Steam Input** ([Controller rule](#controller-rule)). RetroArch reads pads through
   SDL2 (`input_joypad_driver = sdl2`), which honours the devices Steam hides, never
   through udev, which reads `/dev/input` directly and would see the physical pad too.
@@ -1035,9 +1041,10 @@ restore). See [winapps.md](winapps.md) for the step-by-step recipe.*
   change the ROM. Proton is found in Steam's install: `Proton - Experimental`
   first, then the newest installed Proton or `compatibilitytools.d` tool;
   `ROMM_SHELF_PROTON` overrides it. There is no system-Wine fallback. On NixOS,
-  a game started from a terminal can need `steam-run`; `ROMM_SHELF_PROTON_RUNNER`
-  is a command prefix for that (`steam-run`). A Steam shortcut is already inside
-  Steam's own runtime, so it usually needs no runner.
+  Proton needs an FHS environment: romm-shelf prepends `steam-run` when it is on
+  `PATH` and Steam hasn't already supplied a runtime
+  (`STEAM_RUNTIME`/`PRESSURE_VESSEL_RUNTIME`). `ROMM_SHELF_PROTON_RUNNER` overrides
+  that prefix. Without the wrapper Wine starts but never opens a window.
 - **Saves:** Windows `files` entries in the manifest are mapped onto a per-game
   profile in the layout, not into the prefix:
 

@@ -2,40 +2,40 @@
 #
 # The streaming image (notes-deployment.md § Route 5): the upstream webstation
 # container, which already carries Selkies and webstation-broker, plus the
-# romm-shelf wheel and its bundled emulators. The broker keeps ownership of the
-# session, save archive and launcher; romm-shelf must not run its own sync in
-# this container.
+# romm-shelf wheel. Emulators are the same GHCR packs the AppImage uses; the
+# entrypoint installs the ones named by ROMM_SHELF_PACKS_AUTO before handing
+# off to /init. The broker keeps ownership of the session, save archive and
+# launcher; romm-shelf must not run its own sync in this container.
 #
 # scripts/build-docker.sh stages the build context:
-#   wheels/  the romm-shelf wheel
-#   nix/     the emulator bundle's whole store closure
-#
-# Keeping the closure at /nix/store is what lets the bundle's absolute store
-# paths and its nixGL wrappers work, exactly as on a Nix install.
-
+#   wheels/       the romm-shelf wheel
+#   entrypoint.sh the pack bootstrap above /init
 ARG BASE_IMAGE=lscr.io/linuxserver/webstation:romm
 FROM ${BASE_IMAGE}
 
-ARG EMULATORS_PATH=/nix/store/romm-shelf-emulators
 ARG ROMM_SHELF_VERSION=0.0.0
 
 LABEL org.opencontainers.image.title="romm-shelf streaming webstation" \
-      org.opencontainers.image.version="${ROMM_SHELF_VERSION}" \
-      org.romm-shelf.emulators="${EMULATORS_PATH}"
+      org.opencontainers.image.version="${ROMM_SHELF_VERSION}"
 
 USER root
 
-COPY nix/ /nix/
 COPY wheels/ /tmp/romm-shelf-wheels/
+COPY entrypoint.sh /romm-shelf-entrypoint.sh
 
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends python3 python3-venv ca-certificates; \
+    apt-get install -y --no-install-recommends \
+      python3 python3-venv ca-certificates bubblewrap squashfs-tools fuse3; \
     python3 -m venv /opt/romm-shelf/venv; \
     /opt/romm-shelf/venv/bin/pip install --no-cache-dir /tmp/romm-shelf-wheels/*.whl; \
     ln -s /opt/romm-shelf/venv/bin/romm-shelf /usr/local/bin/romm-shelf; \
+    chmod 0755 /romm-shelf-entrypoint.sh; \
     rm -rf /tmp/romm-shelf-wheels /var/lib/apt/lists/*; \
-    test -d "${EMULATORS_PATH}/retroarch"; \
     romm-shelf --help >/dev/null
 
-ENV ROMM_SHELF_EMULATORS=${EMULATORS_PATH}
+# The pack cache persists across container updates, like the rest of /config.
+# ROMM_SHELF_PACKS_AUTO is a comma-separated list; empty installs nothing.
+ENV ROMM_SHELF_PACKS=/config/romm-shelf/packs
+
+ENTRYPOINT ["/romm-shelf-entrypoint.sh"]

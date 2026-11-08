@@ -30,6 +30,16 @@
       py = pkgs.python313Packages;
       project = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project;
       emulators = pkgs.callPackage ./packaging/emulators.nix { };
+      # One OCI image per emulator, for the AppImage and the streaming image. Each is a single
+      # component of the same bundle code, so the two routes cannot drift apart. `import` rather
+      # than `callPackage`: the result is an attrset, and callPackage would add override hooks to
+      # it and turn them into bogus package outputs.
+      packs = import ./packaging/packs.nix {
+        inherit lib;
+        dockerTools = pkgs.dockerTools;
+        inherit (project) version;
+        emulatorsFor = components: pkgs.callPackage ./packaging/emulators.nix { inherit components; };
+      };
 
       # The host tools a native/Proton game needs outside the emulator bundle (design.md § Native
       # games, § Windows games). The AppImage carries its own static copies; a checkout and the Nix
@@ -96,7 +106,7 @@
           program = lib.getExe romm-shelf;
           name = "romm-shelf-${romm-shelf.version}-x86_64.AppImage";
         };
-      };
+      } // lib.mapAttrs' (name: image: lib.nameValuePair "pack-${name}" image) packs;
       # For testing from the working tree: `nix develop -c uv run romm-shelf serve --ui` runs the
       # source as it stands, with the same bundled emulators the package and AppImage carry.
       devShells.${system}.default = pkgs.mkShell {

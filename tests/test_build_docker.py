@@ -41,7 +41,7 @@ def test_plan_prints_inputs_and_writes_nothing(tmp_path):
     )
 
     assert "example/webstation:test" in result.stdout
-    assert "all bundled emulators" in result.stdout
+    assert "from GHCR packs at runtime" in result.stdout
     assert "docker buildx build" in result.stdout
     assert not dist.exists()
 

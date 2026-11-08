@@ -31,12 +31,43 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  appimage:
+    needs: test
+    # The core AppImage is small but still a Nix build; main and tags are enough.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+        (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 8G
+
+      - name: Build AppImage
+        run: scripts/build-appimage.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: dist/*.AppImage
+          if-no-files-found: error
+
   docker:
     needs: test
-    # The image needs a Nix build of the whole emulator closure, a ~6 GB build
-    # context and a ~20 GB upstream-plus-bundle image. Every branch push builds
-    # it (the Nix cache keeps later runs cheap); a pull request builds it only
-    # when labelled "build-docker".
+    # The upstream webstation image is large, so every branch push builds it (the
+    # Nix cache keeps the package cheap); a pull request builds it only when
+    # labelled "build-docker". Emulators come from GHCR packs at runtime.
     if: >-
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
@@ -79,8 +110,7 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # The first run builds RPCS3 and the other emulators; later runs restore
-      # them from the store cache.
+      # The first run builds the Nix package; later runs restore it from the store cache.
       - uses: nix-community/cache-nix-action@v7
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}

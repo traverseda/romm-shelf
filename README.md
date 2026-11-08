@@ -7,7 +7,7 @@ A controller-driven [RomM](https://romm.app) client for [RetroDECK](https://retr
 - launch a game as its own Steam app, controllers from Steam Input
 - sync saves and states with RomM on game start, game exit, and shutdown
 
-**Status:** design. See [docs/design.md](docs/design.md) for the design and [todo.md](todo.md) for open decisions. Windows games are packed as one squashfs and run through Proton; see [docs/winapps.md](docs/winapps.md) for building one. The on-device folders and the one-time BIOS, firmware and Switch-key import are in [docs/bios.md](docs/bios.md). To try it on Windows, [docs/wsl.md](docs/wsl.md) has the WSL2 installer (a batch file, with GPU and controller caveats).
+**Status:** pre-release. See [docs/design.md](docs/design.md) for the design and [todo.md](todo.md) for open decisions. Windows games are packed as one squashfs and run through Proton; see [docs/winapps.md](docs/winapps.md) for building one. The on-device folders and the one-time BIOS, firmware and Switch-key import are in [docs/bios.md](docs/bios.md). To try it on Windows, [docs/wsl.md](docs/wsl.md) has the WSL2 installer (a batch file, with GPU and controller caveats).
 
 **Governing rule:** RetroDECK's folders and the RomM server are the only sources of truth. romm-shelf keeps no state of its own that can't be rebuilt from them, so uninstalling it leaves an ordinary RetroDECK install.
 

@@ -12,9 +12,26 @@
 # eden/{bin/eden, lib, default/qt-config.ini}.
 { lib, runCommand, writeShellScript, writeText, nixgl, libglvnd, retroarch-bare, libretro, libretro-core-info, retroarch-assets,
   retroarch-joypad-autoconfig, libretro-shaders-slang, dolphin-emu, pcsx2, ppsspp, rpcs3, azahar, cemu,
-  eden, bubblewrap, squashfuse, squashfsTools, fuse3 }:
+  eden, bubblewrap, squashfuse, squashfsTools, fuse3, components ? null }:
 
 let
+  # A component is one emulator's folder in the bundle. The full bundle (null) also carries the
+  # native/Proton tools; a single-component bundle is what an OCI pack image wraps.
+  allComponents = [ "retroarch" "dolphin" "pcsx2" "ppsspp" "rpcs3" "azahar" "cemu" "eden" ];
+  selected = if components == null then allComponents else components;
+  want = name: builtins.elem name selected;
+  withTools = components == null;
+  versions = {
+    retroarch = retroarch-bare.version;
+    dolphin = dolphin-emu.version;
+    pcsx2 = pcsx2.version;
+    ppsspp = ppsspp.version;
+    rpcs3 = rpcs3.version;
+    azahar = azahar.version;
+    cemu = cemu.version;
+    eden = eden.version;
+  };
+
   # Exactly the cores romm_shelf_retroarch declares: file stem -> nixpkgs package. The systems
   # RetroDECK launches with a standalone emulator (gc, wii, ps2, psp, switch, n3ds, wiiu, ps3,
   # psvita, xbox) are not here; their standalone plugins own them.
@@ -365,7 +382,12 @@ let
     exec ${lib.getExe nixgl.nixGLIntel} ${lib.getExe nixgl.nixVulkanIntel} ${lib.getExe eden} "$@"
   '';
 in
-runCommand "romm-shelf-emulators-${retroarch-bare.version}" { } ''
+runCommand "romm-shelf-emulators${if components == null then "" else "-" + lib.concatStringsSep "-" selected}" {
+  passthru = { inherit versions; };
+} ''
+  mkdir -p $out
+
+  ${lib.optionalString withTools ''
   # Tools for Windows native games (design.md § Native games, Windows games): the squashfs is
   # mounted read-only and bubblewrap overlays it with a writable layer. Bundled so the AppImage
   # doesn't depend on the host having them.
@@ -375,7 +397,9 @@ runCommand "romm-shelf-emulators-${retroarch-bare.version}" { } ''
   ln -s ${lib.getExe' squashfsTools "unsquashfs"} $out/bin/unsquashfs
   ln -s ${lib.getExe' squashfsTools "mksquashfs"} $out/bin/mksquashfs
   ln -s ${lib.getExe' fuse3 "fusermount3"} $out/bin/fusermount3
+  ''}
 
+  ${lib.optionalString (want "retroarch") ''
   ra=$out/retroarch
   mkdir -p $ra/bin $ra/cores $ra/info
   ln -s ${retroarch} $ra/bin/retroarch
@@ -409,7 +433,9 @@ runCommand "romm-shelf-emulators-${retroarch-bare.version}" { } ''
   [ -f "$slang/crt/crt-guest-advanced-fast.slangp" ] && [ -f "$slang/stock.slang" ] || { echo "no slang shaders"; exit 1; }
   ln -s "$slang" $ra/shaders
   cp ${defaultCfg} $ra/default.cfg
+  ''}
 
+  ${lib.optionalString (want "dolphin") ''
   # Dolphin under the same GL and Vulkan wrappers, with libGL for Steam's overlay. Its Sys folder
   # is found by the store path it was built with.
   dol=$out/dolphin
@@ -417,7 +443,9 @@ runCommand "romm-shelf-emulators-${retroarch-bare.version}" { } ''
   ln -s ${dolphin} $dol/bin/dolphin-emu
   ln -s ${libglvnd}/lib $dol/lib
   cp ${dolphinIni} $dol/default.ini
+  ''}
 
+  ${lib.optionalString (want "pcsx2") ''
   # PCSX2 under the same wrappers. It finds its resources from the store path it was built with;
   # --datapath is given at launch, so only the program and libGL live here.
   ps2=$out/pcsx2
@@ -425,7 +453,9 @@ runCommand "romm-shelf-emulators-${retroarch-bare.version}" { } ''
   ln -s ${pcsx2Wrapper} $ps2/bin/pcsx2-qt
   ln -s ${libglvnd}/lib $ps2/lib
   cp ${pcsx2Ini} $ps2/default.ini
+  ''}
 
+  ${lib.optionalString (want "ppsspp") ''
   # PPSSPP under the same wrappers. Its assets are found from the store path its own wrapper
   # execs; the memory stick is given through XDG_CONFIG_HOME at launch.
   psp=$out/ppsspp
@@ -433,7 +463,9 @@ runCommand "romm-shelf-emulators-${retroarch-bare.version}" { } ''
   ln -s ${ppssppWrapper} $psp/bin/ppsspp
   ln -s ${libglvnd}/lib $psp/lib
   cp ${ppssppIni} $psp/default.ini
+  ''}
 
+  ${lib.optionalString (want "rpcs3") ''
   # RPCS3 under the same wrappers. Its config and input seeds are copied on first run; the user
   # folder is given through XDG_CONFIG_HOME at launch.
   rpcs=$out/rpcs3
@@ -444,7 +476,9 @@ runCommand "romm-shelf-emulators-${retroarch-bare.version}" { } ''
   cp ${rpcs3Input} $rpcs/input/Default.yml
   cp ${rpcs3Profiles} $rpcs/input/active_profiles.yml
   cp ${rpcs3Configs} $rpcs/input/active_input_configurations.yml
+  ''}
 
+  ${lib.optionalString (want "azahar") ''
   # Azahar under the same wrappers. Its config seed is copied on first run; storage paths and
   # renderer settings are patched after that.
   aza=$out/azahar
@@ -452,7 +486,9 @@ runCommand "romm-shelf-emulators-${retroarch-bare.version}" { } ''
   ln -s ${azaharWrapper} $aza/bin/azahar
   ln -s ${libglvnd}/lib $aza/lib
   cp ${azaharIni} $aza/default/qt-config.ini
+  ''}
 
+  ${lib.optionalString (want "cemu") ''
   # Cemu under the same wrappers. Its settings and controller seeds are copied on first run; the
   # MLC folder is given through settings.xml at launch.
   cem=$out/cemu
@@ -464,7 +500,9 @@ runCommand "romm-shelf-emulators-${retroarch-bare.version}" { } ''
   cp ${cemuController1} $cem/input/controllerProfiles/controller1.xml
   cp ${cemuController2} $cem/input/controllerProfiles/controller2.xml
   cp ${cemuController3} $cem/input/controllerProfiles/controller3.xml
+  ''}
 
+  ${lib.optionalString (want "eden") ''
   # Eden under the same wrappers. Its config seed is copied on first run; storage paths, renderer
   # and the Switch updates/DLC folder are patched after that. Keys and firmware stay in bios/.
   edenOut=$out/eden
@@ -472,5 +510,5 @@ runCommand "romm-shelf-emulators-${retroarch-bare.version}" { } ''
   ln -s ${edenWrapper} $edenOut/bin/eden
   ln -s ${libglvnd}/lib $edenOut/lib
   cp ${edenIni} $edenOut/default/qt-config.ini
-
+  ''}
 ''
