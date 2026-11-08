@@ -47,3 +47,12 @@ def test_host_env_drops_the_runtime_variables(monkeypatch):
     env = config.host_env({"GAME_SAVE_DIR": "/saves"})
     assert not {"APPDIR", "APPIMAGE", "ARGV0", "OWD", "APPIMAGE_EXTRACT_AND_RUN"} & env.keys()
     assert env["HOME"] == "/home/deck" and env["GAME_SAVE_DIR"] == "/saves"
+
+
+def test_tool_env_drops_steams_overlay_preload(monkeypatch):
+    monkeypatch.setenv("LD_PRELOAD", "/steam/gameoverlayrenderer.so")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/steam/lib")
+    monkeypatch.setenv("HOME", "/home/deck")
+    env = config.tool_env()
+    assert "LD_PRELOAD" not in env and "LD_LIBRARY_PATH" not in env
+    assert env["HOME"] == "/home/deck"

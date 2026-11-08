@@ -9,6 +9,7 @@ import hashlib
 import itertools
 import os
 import signal
+import subprocess
 import threading
 import time
 from collections import OrderedDict, deque
@@ -27,9 +28,9 @@ from loguru import logger
 from romm_shelf import bios, media, mods, patches, player, sleep, steam
 from romm_shelf.adapters import DiscReader, load_adapters
 from romm_shelf.auth import Session, load_session
-from romm_shelf.config import Settings
+from romm_shelf.config import Settings, host_env, play_log, program
 from romm_shelf.layout import RetroDeckLayout
-from romm_shelf.library import LocalRom, match, scan_local
+from romm_shelf.library import LocalRom, match, remember, scan_local
 from romm_shelf.romm import Rom
 from romm_shelf.sync import inventory
 from romm_shelf.service import SyncResult, rom_for_path, sync_roms
@@ -114,6 +115,7 @@ class Shelf:
         self.adapters = load_adapters()
         self._lock = Lock()
         self._library: Library | None = None
+        self._library_at = 0.0
         # Files modified after this were not synced by this process yet. Kept in
         # memory only: losing it on restart means the next sleep sync is smaller,
         # never that anything is lost (the next game-end or manual sync catches up).
@@ -123,6 +125,9 @@ class Shelf:
         self.activity: deque[dict] = deque(maxlen=50)
         self._job_ids = itertools.count(1)
         self.covers = CoverCache()
+        # Packaged games this server started; one at a time, so a second Play can't run the same
+        # game (and its overlay) twice. In memory only; a restart forgets it.
+        self.playing: dict[int, subprocess.Popen] = {}
         # The last `sync --all --plan`, for the UI's out-of-sync badges. Dropped whenever a sync,
         # install or uninstall may have changed it; the UI asks again.
         self._sync_status: dict | None = None
@@ -251,6 +256,7 @@ class Shelf:
 
     def uninstall(self, rom_id: int) -> dict:
         lib = self.library()
+        self.rescan_local()  # the file may have been removed or replaced since the library was built
         local = lib.local.get(rom_id)
         if local is None:
             raise HTTPException(404, "not on this device")
@@ -287,18 +293,30 @@ class Shelf:
 
     def library(self, refresh: bool = False) -> Library:
         with self._lock:
-            if refresh or self._library is None:
-                remote = list(self.client.roms())
+            if refresh or self._library is None or time.time() - self._library_at > LIBRARY_TTL:
+                try:
+                    remote = list(self.client.roms())
+                except Exception as e:
+                    if self._library is None:
+                        raise
+                    # Offline or RomM down: keep showing the last library, try again next time.
+                    logger.warning("library refresh failed, keeping the last copy: {}", e)
+                    return self._library
                 m = match(scan_local(self.layout.roms), remote)
+                remember(m.matched)
                 self._library = Library(
                     roms={r.id: r for r in remote},
                     local={r.id: l for l, r in m.matched},
                     local_only=m.local_only,
                 )
+                self._library_at = time.time()
             return self._library
 
 
 BACKGROUND_INTERVAL = 15 * 60
+LIBRARY_TTL = 60.0
+"""How long a library kept in memory is served before RomM is asked again, so a ROM added or
+removed on the server shows up without restarting the daemon."""
 
 
 def background_sync(shelf: "Shelf", interval: float = BACKGROUND_INTERVAL, rounds: int | None = None) -> None:
@@ -440,9 +458,11 @@ def create_app(settings: Settings | None = None, *, ui: bool = False, watch_slee
     def uninstall(rom_id: int):
         return shelf.uninstall(rom_id)
 
-    # Play (design.md § Bundled emulators): the game is its own Steam app, added when it was installed,
-    # so Steam owns its window and gives it its own Steam Input profile. Play only opens that app; its
-    # `romm-shelf play <rom>` syncs the saves. Answers at once; the Activity job says if Steam refused.
+    # Play: a packaged game (native folder or squashfs, Linux or Proton) runs `romm-shelf play` here,
+    # outside Steam: Steam's children have NoNewPrivs and can't mount the archive (todo.md). Every
+    # other game is its own Steam app, added at install, so Steam owns its window and gives it its
+    # own Steam Input profile (design.md § Bundled emulators, § Controller rule). Answers at once;
+    # the Activity job says if the launch failed.
     @app.post("/api/rom/{rom_id}/play", status_code=202)
     def play(rom_id: int):
         lib = shelf.library()
@@ -454,15 +474,49 @@ def create_app(settings: Settings | None = None, *, ui: bool = False, watch_slee
         if local is None:
             raise HTTPException(409, f"{name} is not on this device")
         try:  # refuse a game nothing here can run before touching Steam
-            player.run_plan(shelf.settings, shelf.layout, local, rom)
+            player.run_plan(shelf.settings, shelf.layout, local)
         except player.NotPlayable as e:
             raise HTTPException(409, f"{name} can't run here: {e}")
-        if not steam.available():
-            raise HTTPException(409, f"Steam isn't installed. `romm-shelf play {rom_id}` runs {name} "
-                                     "without it (no Steam Input)")
+        if (process := shelf.playing.get(rom_id)) is not None:
+            if process.poll() is None:
+                raise HTTPException(409, f"{name} is already running")
+            shelf.playing.pop(rom_id, None)
         if job := shelf.running("play", rom_id):
             return job
         job = shelf.start_job("play", name, rom_id=rom_id)
+
+        if player.launches_directly(local):
+            job["via"] = "direct"
+
+            def open_directly():
+                try:
+                    process = subprocess.Popen([program(), "play", str(rom_id)], env=host_env(),
+                                               start_new_session=True)
+                    shelf.playing[rom_id] = process
+                    job["log"].append({"step": f"running romm-shelf play {rom_id}", "error": None})
+                    try:
+                        code = process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        shelf.end_job(job)  # the game is up; `play` writes any later failure to its log
+                        process.wait()
+                        return
+                    if code:
+                        shelf.end_job(job, f"romm-shelf play {rom_id} exited {code}; see {play_log(rom_id)}")
+                    else:
+                        shelf.end_job(job)
+                except Exception as e:
+                    logger.exception("launch of {} failed", rom_id)
+                    shelf.end_job(job, str(e) or type(e).__name__)
+                finally:
+                    shelf.playing.pop(rom_id, None)
+
+            threading.Thread(target=open_directly, daemon=True).start()
+            return job
+
+        job["via"] = "steam"
+        if not steam.available():
+            shelf.end_job(job, "Steam isn't installed")
+            return job
 
         def open_in_steam():
             try:

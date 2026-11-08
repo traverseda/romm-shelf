@@ -4,7 +4,11 @@
 # and romm-shelf's own wheel. No /nix inside and no user-namespace chroot (what nix-appimage and
 # nix-bundle do), because romm-shelf starts host programs that need one of their own: Flatpak
 # Firefox's bwrap gets EPERM from unshare() inside a chroot.
-{ lib, stdenvNoCC, fetchurl, python3, squashfsTools, romm-shelf, emulators, lockFile }:
+#
+# Emulators are not inside: the pack manager pulls them from GHCR (notes-ghcr-emulator-packs.md).
+# The static tools here are for native/Proton games, which need bwrap, squashfuse and mksquashfs
+# on the host; they are copied in because a no-chroot AppImage cannot use /nix/store symlinks.
+{ lib, stdenvNoCC, fetchurl, python3, squashfsTools, romm-shelf, lockFile, pkgsStatic }:
 
 let
   pyVersion = "3.13";
@@ -49,8 +53,11 @@ let
     #!/bin/sh
     # sys.argv[0] is only the name in --help; units and shortcuts record $APPIMAGE (config.program()).
     here="''${APPDIR:-$(dirname "$(readlink -f "$0")")}"
-    # The bundled emulators (design.md § Bundled emulators) are this AppImage's, whatever's in the env.
-    export ROMM_SHELF_EMULATORS="$here/emulators"
+    # Native/Proton games use these instead of an all-in-one emulator bundle. Emulators themselves
+    # come from installed packs (packs.py), which bind their store at /nix inside bwrap.
+    export ROMM_SHELF_TOOLS="$here/bin"
+    # squashfuse finds fusermount3 on PATH; bwrap and the squashfs tools are the AppImage's too.
+    export PATH="$here/bin:$PATH"
     exec "$here/python/bin/python3" -I -c 'import sys; sys.argv[0] = "romm-shelf"; from romm_shelf.cli import app; app()' "$@"
   '';
 in
@@ -64,8 +71,13 @@ stdenvNoCC.mkDerivation {
     runHook preBuild
     mkdir AppDir
     tar -xzf ${python} -C AppDir   # python/
-    cp -r ${emulators} AppDir/emulators
-    chmod -R u+w AppDir/emulators
+    # Static tools, copied out of the store: the AppImage must not need /nix on the host.
+    mkdir -p AppDir/bin
+    cp ${lib.getExe pkgsStatic.bubblewrap} AppDir/bin/bwrap
+    cp ${lib.getExe' pkgsStatic.squashfuse "squashfuse"} AppDir/bin/squashfuse
+    cp ${lib.getExe' pkgsStatic.squashfsTools "unsquashfs"} AppDir/bin/unsquashfs
+    cp ${lib.getExe' pkgsStatic.squashfsTools "mksquashfs"} AppDir/bin/mksquashfs
+    cp ${lib.getExe' pkgsStatic.fuse3 "fusermount3"} AppDir/bin/fusermount3
     site=AppDir/python/lib/python${pyVersion}/site-packages
     # pip reads the tags from the file name, which a store path prefixes with its hash.
     mkdir wheels

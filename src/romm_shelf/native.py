@@ -20,12 +20,13 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TextIO
 
 import yaml
 from loguru import logger
 
 from romm_shelf.adapters import DiscReader, LocalSave
-from romm_shelf.config import host_env
+from romm_shelf.config import host_env, tool_env
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom
 from romm_shelf.romm import Rom
@@ -33,6 +34,7 @@ from romm_shelf.romm import Rom
 MANIFEST = ".ludusavi.yaml"
 PLATFORM = "linux"
 EMULATOR = "native"
+ARCHIVE_SUFFIX = ".squashfs"
 
 
 class ManifestError(ValueError):
@@ -136,6 +138,11 @@ def is_game(folder: Path) -> bool:
     return folder.is_dir() and (folder / MANIFEST).is_file()
 
 
+def is_archive(path: Path) -> bool:
+    """Whether this installed ROM is a native game packed as one squashfs archive."""
+    return path.is_file() and path.name.lower().endswith(ARCHIVE_SUFFIX)
+
+
 def _program(game: FolderGame, folder: Path) -> Path:
     found = [p for p in folder.iterdir() if p.is_file() and fnmatch.fnmatch(p.name, game.program)]
     if len(found) != 1:
@@ -228,17 +235,32 @@ def folder_saves(folder: Path) -> list[LocalSave]:
 
 
 class NativeAdapter:
-    """Find a folder game's saves from the manifest in its installed folder."""
+    """Find a native game's saves: a folder's own manifest, or a squashfs archive's."""
 
     name = "native"
     emulator = EMULATOR
 
+    def _archive_saves(self, path: Path, layout: RetroDeckLayout) -> list[LocalSave]:
+        from romm_shelf import proton
+        return proton.squashfs_saves(path, layout, PLATFORM, self.emulator)
+
     def saves_for(self, rom: LocalRom, layout: RetroDeckLayout) -> list[LocalSave]:
-        return folder_saves(rom.path) if rom.system == PLATFORM else []
+        if rom.system != PLATFORM:
+            return []
+        if rom.path.is_dir():
+            return folder_saves(rom.path)
+        if is_archive(rom.path):
+            return self._archive_saves(rom.path, layout)
+        return []
 
     def target_path(self, rom: LocalRom, layout: RetroDeckLayout, kind: str, file_name: str,
                     slot: str | None = None) -> Path | None:
-        if kind != "save" or rom.system != PLATFORM or not is_game(rom.path):
+        if kind != "save" or rom.system != PLATFORM:
+            return None
+        if is_archive(rom.path):
+            from romm_shelf import proton
+            return proton.target_for_slot(rom.path, layout, slot, PLATFORM)
+        if not is_game(rom.path):
             return None
         try:
             game = folder_game(rom.path)
@@ -258,9 +280,14 @@ class NativeAdapter:
         root = layout.roms / PLATFORM
         if not root.is_dir():
             return paired, unmatched
-        for folder in sorted(p for p in root.iterdir() if is_game(p)):
-            saves = folder_saves(folder)
-            if (rom := by_name.get((PLATFORM, folder.name))) is not None:
+        for entry in sorted(root.iterdir()):
+            if entry.is_dir() and is_game(entry):
+                saves = folder_saves(entry)
+            elif is_archive(entry):
+                saves = self._archive_saves(entry, layout)
+            else:
+                continue
+            if (rom := by_name.get((PLATFORM, entry.name))) is not None:
                 paired.extend((rom, save) for save in saves)
             else:
                 unmatched.extend(saves)
@@ -268,7 +295,7 @@ class NativeAdapter:
 
     def restore_path(self, rom: Rom, layout: RetroDeckLayout, reader: DiscReader,
                      slot: str | None) -> Path | None:
-        return None  # the manifest lives in the installed folder; there's nothing to resolve without it
+        return None  # the manifest lives in the installed copy; there's nothing to resolve without it
 
 
 # Running
@@ -358,9 +385,9 @@ def prepare(plan: RunPlan) -> None:
         path.symlink_to(target)
 
 
-def _mount(mount: Mount, timeout: float = 15) -> subprocess.Popen:
+def _mount(mount: Mount, timeout: float = 15, stderr=None) -> subprocess.Popen:
     process = subprocess.Popen(list(mount.command), stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL)
+                               stderr=stderr or subprocess.DEVNULL, env=tool_env())
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if os.path.ismount(mount.target):
@@ -372,17 +399,20 @@ def _mount(mount: Mount, timeout: float = 15) -> subprocess.Popen:
     raise RuntimeError(f"{mount.describe()} timed out")
 
 
-def launch(plan: RunPlan) -> int:
+def launch(plan: RunPlan, output: TextIO | None = None) -> int:
+    """Run the plan. `output` receives the program's stdout and stderr, which a Steam launch would
+    otherwise discard; unset passes them through to this process."""
     mounted: list[tuple[Mount, subprocess.Popen]] = []
     try:
         for mount in plan.mounts:
-            mounted.append((mount, _mount(mount)))
+            mounted.append((mount, _mount(mount, stderr=output)))
         return subprocess.run([str(plan.program), *plan.args], cwd=plan.cwd,
-                              env=host_env(plan.env)).returncode
+                              env=host_env(plan.env), stdout=output,
+                              stderr=subprocess.STDOUT if output is not None else None).returncode
     finally:
         for mount, process in reversed(mounted):
             subprocess.run(list(mount.unmount), stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, check=False)
+                           stderr=subprocess.DEVNULL, check=False, env=tool_env())
             if process.poll() is None:
                 process.terminate()
                 try:

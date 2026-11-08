@@ -134,7 +134,7 @@ class PpssppEmulator:
     """Run on top of the default when PPSSPP is first set up (design.md § Patches)."""
 
     def run_plan(self, rom: LocalRom, layout: RetroDeckLayout, bundle: Path, runtime: Path) -> RunPlan:
-        from romm_shelf.emulators import content, local_program, steam_overlay_libs
+        from romm_shelf.emulators import bundle_entry, content, local_program, steam_overlay_libs
         from romm_shelf.patches import SETTINGS_PATCH, values
         chosen = values(SETTINGS_PATCH)
         game = content(rom, LAUNCHABLE)
@@ -144,7 +144,7 @@ class PpssppEmulator:
             return RunPlan(program, (*extra, *args), {}, rom.path.parent, seed={})
         ppsspp = bundle / "ppsspp"
         program = ppsspp / "bin/ppsspp"
-        if not program.exists():
+        if not bundle_entry(program):
             raise FileNotFoundError(f"{self.name}: {program} isn't in the bundle")
         home = user_dir()
         config = home / "PSP/SYSTEM/ppsspp.ini"

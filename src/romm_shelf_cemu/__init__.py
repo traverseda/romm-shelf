@@ -121,7 +121,7 @@ class CemuEmulator:
     """Run on top of the default when Cemu is first set up (design.md § Patches)."""
 
     def run_plan(self, rom: LocalRom, layout: RetroDeckLayout, bundle: Path, runtime: Path) -> RunPlan:
-        from romm_shelf.emulators import local_program, steam_overlay_libs
+        from romm_shelf.emulators import bundle_entry, local_program, steam_overlay_libs
         from romm_shelf.patches import SETTINGS_PATCH, values
         chosen = values(SETTINGS_PATCH)
         game = game_path(rom)
@@ -131,7 +131,7 @@ class CemuEmulator:
             return RunPlan(program, (*extra, *args), {}, rom.path.parent, seed={})
         cemu = bundle / "cemu"
         program = cemu / "bin/cemu"
-        if not program.exists():
+        if not bundle_entry(program):
             raise FileNotFoundError(f"{self.name}: {program} isn't in the bundle")
         home = user_dir()
         config = home / "settings.xml"

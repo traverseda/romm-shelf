@@ -6,6 +6,11 @@ game a writable overlay with `bwrap`, and runs its executable through Steam
 Proton. Nothing about a particular game lives in romm-shelf: the archive carries
 a `.ludusavi.yaml` that says what to run and where the saves are.
 
+The same recipe packs a **Linux native game** with `--platform linux`: it goes on
+RomM's `linux` platform and runs through `steam-run` or the Steam Linux Runtime
+instead of Proton, with a per-game profile bound over `$HOME`. See
+[design.md § Native games](design.md#native-games).
+
 ## What you need
 
 - the game folder, with the executable and its data
@@ -107,14 +112,14 @@ other devices. Add the path to `files` with `tags: [save]` and repack.
 
 ```sh
 romm-shelf native pack "Quake Brutalist Jam 3" \
-  --squashfs "Quake Brutalist Jam 3.squashfs" --plan
+  --squashfs "Quake Brutalist Jam 3.squashfs" --platform win --plan
 ```
 
 The plan prints the archive size, the program and the metadata. Pack it:
 
 ```sh
 romm-shelf native pack "Quake Brutalist Jam 3" \
-  --squashfs "Quake Brutalist Jam 3.squashfs"
+  --squashfs "Quake Brutalist Jam 3.squashfs" --platform win
 ```
 
 The archive is deterministic: `zstd` at its highest level, 1 MiB blocks,

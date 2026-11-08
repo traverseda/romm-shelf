@@ -58,8 +58,14 @@ def bundle_dir(settings: Settings) -> Path:
         return settings.resolve(settings.emulators)
     if CHECKOUT_EMULATORS.is_dir():
         return CHECKOUT_EMULATORS
-    raise FileNotFoundError("no bundled emulators: run romm-shelf from its AppImage, set "
+    raise FileNotFoundError("no bundled emulators: install a pack (`romm-shelf packs install`), set "
                             "ROMM_SHELF_EMULATORS, or in a checkout `nix build .#emulators -o result-emulators`")
+
+
+def bundle_entry(path: Path) -> bool:
+    """Whether a bundle member exists. A pack's store is only mounted at /nix inside bwrap, so its
+    symlinks dangle on the host; `lexists` keeps the launch plan working there."""
+    return os.path.lexists(path)
 
 
 def steam_overlay_libs(emulator: Path) -> dict[str, str]:
@@ -67,7 +73,7 @@ def steam_overlay_libs(emulator: Path) -> dict[str, str]:
     every process of a game it launches, and the overlay needs libGL.so.1; the bundle's programs use
     Nix's loader, which never looks in /usr/lib, so without this each one fails to start."""
     libs = emulator / "lib"
-    if not libs.is_dir():
+    if not bundle_entry(libs):
         return {}
     rest = os.environ.get("LD_LIBRARY_PATH")
     return {"LD_LIBRARY_PATH": f"{libs}:{rest}" if rest else str(libs)}
@@ -153,7 +159,7 @@ class LibretroCore:
             return self.local_plan(rom, chosen, layout)
         retroarch = bundle / "retroarch"
         core = retroarch / "cores" / f"{self.core}.so"
-        if not core.is_file():
+        if not bundle_entry(core):
             raise FileNotFoundError(f"{self.name}: {core} isn't in the bundle")
         home = emulator_home()
         config = home / "retroarch/retroarch.cfg"

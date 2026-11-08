@@ -31,6 +31,15 @@
       project = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project;
       emulators = pkgs.callPackage ./packaging/emulators.nix { };
 
+      # The host tools a native/Proton game needs outside the emulator bundle (design.md § Native
+      # games, § Windows games). The AppImage carries its own static copies; a checkout and the Nix
+      # package use these, and `nix develop` roots them at result-tools so a Steam shortcut run
+      # without the shell's environment still finds them.
+      nativeTools = pkgs.symlinkJoin {
+        name = "romm-shelf-native-tools";
+        paths = [ pkgs.bubblewrap pkgs.squashfuse pkgs.squashfsTools pkgs.fuse3 ];
+      };
+
       # nixpkgs' ansible-core propagates every collection (the `ansible` package, 560 MB) and the
       # network libraries they use. Patches run on localhost with ansible.builtin, so only what
       # ansible-core itself requires.
@@ -53,7 +62,7 @@
         pyproject = true;
         src = lib.fileset.toSource {
           root = ./.;
-          fileset = lib.fileset.unions [ ./pyproject.toml ./README.md ./src ./tests ./scripts ];
+          fileset = lib.fileset.unions [ ./pyproject.toml ./README.md ./src ./tests ./scripts ./packaging ];
         };
         build-system = [ py.hatchling ];
         # pyproject.toml's dependencies, from nixpkgs rather than uv.lock.
@@ -63,6 +72,8 @@
         # The bundled emulators (design.md § Bundled emulators), unless the environment names others.
         # A shell for Ansible's local connection, last on PATH so the host's tools still come first.
         makeWrapperArgs = [ "--set-default" "ROMM_SHELF_EMULATORS" "${emulators}"
+                            "--set-default" "ROMM_SHELF_TOOLS" "${nativeTools}/bin"
+                            "--suffix" "PATH" ":" "${nativeTools}/bin"
                             "--suffix" "PATH" ":" "${pkgs.bash}/bin" ];
         # pgrep: the tests check whether ES-DE is running. At run time the host's is used, like
         # systemctl and steamos-add-to-steam.
@@ -72,9 +83,16 @@
     in {
       packages.${system} = {
         inherit romm-shelf emulators;
+        native-tools = nativeTools;
         default = romm-shelf;
-        # One file for the Deck (design.md § Distribution): the same store paths as a NixOS install.
-        appimage = nix-appimage.lib.${system}.mkAppImage {
+        # One file for the Deck (design.md § Distribution): a small no-chroot core. Emulators are
+        # pulled from GHCR packs, not baked in. The fat nix-appimage build stays as a fallback while
+        # the pack path is proven on the Deck.
+        appimage = pkgs.callPackage ./packaging/appimage.nix {
+          inherit romm-shelf;
+          lockFile = ./uv.lock;
+        };
+        appimage-fat = nix-appimage.lib.${system}.mkAppImage {
           program = lib.getExe romm-shelf;
           name = "romm-shelf-${romm-shelf.version}-x86_64.AppImage";
         };
@@ -82,12 +100,14 @@
       # For testing from the working tree: `nix develop -c uv run romm-shelf serve --ui` runs the
       # source as it stands, with the same bundled emulators the package and AppImage carry.
       devShells.${system}.default = pkgs.mkShell {
-        packages = [ pkgs.uv pkgs.python313 ];
+        packages = [ pkgs.uv pkgs.python313 nativeTools ];
         ROMM_SHELF_EMULATORS = "${emulators}";
         # A game's Steam shortcut runs the checkout's romm-shelf without this shell's environment:
-        # it finds the emulators through this link (emulators.py CHECKOUT_EMULATORS), a GC root.
+        # it finds the emulators and native tools through these links (emulators.py, packs.py), GC
+        # roots kept outside the shell.
         shellHook = ''
           [ -f flake.nix ] && nix-store --add-root result-emulators --realise ${emulators} >/dev/null
+          [ -f flake.nix ] && nix-store --add-root result-tools --realise ${nativeTools} >/dev/null
         '';
       };
     };

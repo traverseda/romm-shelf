@@ -117,7 +117,7 @@ class Pcsx2Emulator:
     """Run on top of the default when PCSX2 is first set up (design.md § Patches)."""
 
     def run_plan(self, rom: LocalRom, layout: RetroDeckLayout, bundle: Path, runtime: Path) -> RunPlan:
-        from romm_shelf.emulators import content, local_program, steam_overlay_libs
+        from romm_shelf.emulators import bundle_entry, content, local_program, steam_overlay_libs
         from romm_shelf.patches import SETTINGS_PATCH, values
         chosen = values(SETTINGS_PATCH)
         game = content(rom, LAUNCHABLE)
@@ -127,7 +127,7 @@ class Pcsx2Emulator:
                            rom.path.parent, seed={})
         pcsx2 = bundle / "pcsx2"
         program = pcsx2 / "bin/pcsx2-qt"
-        if not program.exists():
+        if not bundle_entry(program):
             raise FileNotFoundError(f"{self.name}: {program} isn't in the bundle")
         data = user_dir()
         config = data / "inis/PCSX2.ini"

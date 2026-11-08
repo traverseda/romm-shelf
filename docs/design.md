@@ -26,9 +26,11 @@ The rest of this document follows from that rule:
 - **Uninstalling.** Removing romm-shelf leaves an ordinary RetroDECK install.
   Downloaded games are ordinary files in `roms/<system>/`. Saves stay where the
   emulators put them.
-- **Local files.** The only file romm-shelf writes for itself is the device
-  credential, at `~/.config/romm-shelf/credentials.json`, mode 0600. Losing it
-  means pairing again. It never means losing data.
+- **Local files.** The only durable file romm-shelf writes for itself is the
+  device credential, at `~/.config/romm-shelf/credentials.json`, mode 0600.
+  Losing it means pairing again. It never means losing data. A disposable launch
+  index also lives in `$XDG_CACHE_HOME/romm-shelf/` (see [Offline](#offline));
+  deleting it only costs an offline launch until the next match rebuilds it.
 
 ## Controller rule
 
@@ -88,16 +90,27 @@ available as a CLI command; see [Parity](#cli-ui-parity).
 *Decided 2026-11-07 (owner): an AppImage. It replaces rsyncing the repo to the
 Deck and running it with uv.*
 
-- **One file**, `romm-shelf-<version>-x86_64.AppImage` (49 MB), baked by Nix:
+- **One file**, `romm-shelf-<version>-x86_64.AppImage` (~60 MB), baked by Nix:
   `nix build .#appimage` (`flake.nix`, `packaging/appimage.nix`). Inside:
   python-build-standalone's relocatable CPython, the PyPI wheels `uv.lock` pins
   (read straight from the lock, URLs and hashes included, so a lock change needs no
-  hand-kept hash), and romm-shelf's own wheel, which Nix builds after running the
-  tests. Plus a pinned AppImage type2 runtime. Nothing under `/nix` is inside, so it
-  needs nothing on the device besides FUSE. `nix build .#romm-shelf` is the
-  ordinary Nix package, for NixOS.
+  hand-kept hash), romm-shelf's own wheel, which Nix builds after running the
+  tests, and static `bwrap`/squashfs tools for native games. Plus a pinned AppImage
+  type2 runtime. Nothing under `/nix` is inside, so it needs nothing on the device
+  besides FUSE. `nix build .#romm-shelf` is the ordinary Nix package, for NixOS.
+- **Emulators are packs, not AppImage payload.** Each emulator is an OCI image on
+  GHCR (`romm-shelf-pack-retroarch`, `-dolphin`, `-pcsx2`, …). `packs.py` reads
+  the exact image digests from the release's `latest.json`, pulls missing layers
+  anonymously, and extracts their Nix store paths into a shared cache at
+  `~/.local/share/romm-shelf/packs` (`ROMM_SHELF_PACKS` overrides it). Layers are
+  content-addressed, so a second pack downloads only its delta. A pack-backed game
+  runs under the AppImage's static `bwrap`, which binds the cache's `nix` at `/nix`;
+  the cache is rebuildable from GHCR and is not romm-shelf state. `nix build
+  .#appimage-fat` keeps the old all-in-one nix-appimage build as a fallback while
+  the pack path is proven on the Deck.
 - **Not a Flatpak.** romm-shelf starts host programs as part of its job:
-  `systemctl --user`, `steamos-add-to-steam`, Flatpak Firefox, and native games.
+  `systemctl --user`, `steamos-add-to-steam`, Firefox (the Flatpak when it is
+  installed, otherwise the host's), and native games.
   Inside a Flatpak each would need `flatpak-spawn --host`, which needs
   `org.freedesktop.Flatpak`, and that permission already removes the sandbox.
 - **Not nix-appimage or nix-bundle.** Both run the program inside a user-namespace
@@ -115,8 +128,9 @@ Deck and running it with uv.*
 - **Tested** on azrael (NixOS, run with binfmt's `appimage-run` bypassed, as on
   any other distro): `--help` in 1.2 s, and `shortcut --plan` records the
   AppImage's path. Not yet run on the Deck.
-- **Open:** where the file lives on the device and how a newer one arrives. See
-  todo.md, together with turning patches into scripts.
+- **Open:** where the file lives on the device and how a newer one arrives; pack
+  update cadence, signing and a bwrap/user-namespace fallback. See todo.md,
+  together with turning patches into scripts.
 
 ## Core and plugins
 
@@ -230,7 +244,8 @@ A local ROM is matched to a RomM ROM by trying these in order:
 3. **No match.** The ROM shows up as "local only". Its saves are never uploaded,
    because RomM needs a `rom_id`.
 
-Results are cached in memory for a single run only. Nothing is written to disk.
+Results are held in memory for a run. The only thing written to disk is the
+[launch index](#offline): `rom_id -> system/name`, a cache rebuilt by every match.
 
 **Checked against the test setup on 2026-10-26.** RomM has 1,230 ROMs:
 
@@ -321,6 +336,37 @@ still on the server, or in the local backup folder.
 - `emulators=[…]` is always sent in negotiate requests, so a Dolphin save and a
   RetroArch save in the same slot are never paired with each other.
 - The first sync from a device is a dry run unless `--confirm` is passed.
+
+## Offline
+
+*Requirement (owner, 2026-11-08): romm-shelf must keep working with no RomM
+connection. In scope: playing installed games and applying patches. Browsing the
+shelf, installing and managing games still need RomM.*
+
+- **Playing.** `play <rom>` asks RomM for that one ROM so it can sync its saves.
+  When RomM is unreachable it runs the game from the local copy and skips the
+  sync, in both directions. The saves stay on disk and go up with the next sync
+  that works (the background service, a game end, or a manual sync), so nothing
+  is lost and nothing is recorded about what is pending.
+- **Finding the local copy.** The Steam shortcut holds only the ROM id, and the
+  local file is matched to it by RomM. A launch index in
+  `$XDG_CACHE_HOME/romm-shelf/launch-index.json` (`ROMM_SHELF_CACHE_DIR`
+  overrides the folder) maps `rom_id -> system/name` under `roms/`. It is written
+  whenever a match is made (`play` online, a sync that runs, the UI's library)
+  and read only when
+  RomM can't be reached. A stale entry whose file is gone is ignored. It is a
+  cache: deleting it costs an offline launch until the next match rebuilds it,
+  and it is never consulted to decide what to sync.
+- **A ROM RomM says is missing** (a 404) is still an error: the index is not used
+  to launch a game RomM no longer has.
+- **Patches.** Applying a patch is `ansible-playbook` on this machine and needs
+  no network. The RomM layer of patches (design.md § Patches, From RomM) is
+  refreshed when the list is read; offline, the last mirrored copies stand, and
+  the CLI says they weren't refreshed. Built-in and user patches are unaffected.
+- **Out of scope.** The UI's shelf and game pages are built from RomM's library,
+  so with no connection they have nothing to show. A game is launched from its
+  Steam entry instead, which is how Game Mode launches it anyway. Downloading
+  media, firmware and games needs RomM by definition.
 
 ## Shelf (downloads)
 
@@ -454,9 +500,10 @@ roms/switch/BotW [01007EF00011E000]/        in RomM
 
 *Decided 2026-11-07 (owner): romm-shelf bundles its own emulators and replaces
 RetroDECK. RetroArch with libretro cores comes first, for the basic systems (NES
-first), but standalone emulators are supported the same way. They live inside
-romm-shelf's AppImage. A game launches from its own Steam shortcut through
-`romm-shelf play`. Being built; nothing below runs on the Deck yet.*
+first), but standalone emulators are supported the same way. The Nix package and a
+checkout use one all-in-one bundle; the AppImage pulls one pack per emulator from
+GHCR (design.md § Distribution). A game launches from its own Steam shortcut
+through `romm-shelf play`. Being built; nothing below runs on the Deck yet.*
 
 - **One model for every emulator.** An `Emulator` (`emulators.py`) names the RomM
   platforms it runs and turns an installed game into a run plan: program,
@@ -470,13 +517,14 @@ romm-shelf's AppImage. A game launches from its own Steam shortcut through
   stays standalone, even where a libretro core exists. *Owner, 2026-11-07.* The
   first emulator that lists the game's platform, in plugin order; a per-platform
   override is still to decide (todo.md).
-- **Bundled.** The AppImage holds `emulators/`: RetroArch 1.22.2 unpacked from
-  libretro's own Linux AppImage, and the cores romm-shelf uses. Both are libretro's
-  stable builds from buildbot.libretro.com, pinned by hash in `flake.nix` (the
-  same approach as python-build-standalone: relocatable upstream builds that use the
-  host's GPU drivers, baked by Nix). romm-shelf finds them through
-  `ROMM_SHELF_EMULATORS`, which the AppImage sets. A checkout points it at
-  `nix build .#emulators`.
+- **Bundled.** The Nix package and a checkout hold one `emulators/` folder:
+  RetroArch 1.22.2 unpacked from libretro's own Linux AppImage, and the cores
+  romm-shelf uses, plus the standalone emulators. They are passed in through
+  `ROMM_SHELF_EMULATORS` (the Nix wrapper sets it; a checkout points it at
+  `nix build .#emulators`). The AppImage instead installs packs: each pack carries
+  the same `retroarch/`, `dolphin/`, … layout, and `play` wraps it in `bwrap` so the
+  pack's store is at `/nix`. Explicit `ROMM_SHELF_EMULATORS` or a checkout always
+  wins over a pack.
 - **Steam Input** ([Controller rule](#controller-rule)). RetroArch reads pads through
   SDL2 (`input_joypad_driver = sdl2`), which honours the devices Steam hides, never
   through udev, which reads `/dev/input` directly and would see the physical pad too.
@@ -527,7 +575,12 @@ romm-shelf's AppImage. A game launches from its own Steam shortcut through
   `romm-shelf shortcut <rom>` adds one for a game installed before that, and never
   adds a second one. The UI's Play button only opens the app: no dialog, it
   answers at once, and the Activity job says if Steam refused. It adds a missing
-  shortcut first, and it never starts the emulator itself (§ UI). `steam.py`
+  shortcut first, and it never starts the emulator itself (§ UI). One exception,
+  *decided 2026-11-08*: a packaged game (native folder or squashfs) is run by the
+  UI's own server as `romm-shelf play <rom>` instead, because Steam starts its
+  children with `NoNewPrivs` and they cannot mount the archive (todo.md). Those
+  games get no Steam Input for now; emulator games still open their Steam app.
+  `steam.py`
   writes the entry, asks the running client to add it, reads back the appid
   Steam assigned from `shortcuts.vdf`, and opens `steam://rungameid/<id>`; no id
   is calculated or stored. Without Steam the UI can't play; `romm-shelf play
@@ -867,10 +920,11 @@ alternatives. An emulator added this way (Eden, for Switch) is one patch
 
 ## Native games
 
-*Status: tentatively approved 2026-11-06; changed 2026-11-07 (owner) to folder
-ROMs with a ludusavi manifest. The code is written and tested without a server
-(`native.py`). Nothing has been uploaded or run this way yet. Open decisions are
-in todo.md.*
+*Status: tentatively approved 2026-11-06; folder ROMs from 2026-11-07; changed
+2026-11-08 (owner) to one squashfs archive per game — the same pipeline as
+Windows games, run through `steam-run` or the Steam Linux Runtime instead of
+Proton. The two existing Linux folder ROMs were repacked as squashfs and are
+installed on azrael; not yet run on the Deck. Open decisions are in todo.md.*
 
 A static recompilation is a native Linux game built from the user's own game
 files: no emulator, ROM or RetroDECK component. Two work so far: TotK Recomp on
@@ -879,66 +933,95 @@ part of an hour, and its result is a folder that can be copied. So a machine get
 the build from RomM rather than building it again. Building stays a job for each
 project's own setup; romm-shelf starts from a finished folder.
 
-- **In RomM:** one folder ROM per game on RomM's `linux` platform, holding the
-  built folder and a `.ludusavi.yaml` at its top level. The ROM is put into RomM's
-  library and scanned; romm-shelf doesn't build, zip or upload it. The result
-  contains the game, so it's for the user's own private server and is never made
-  public.
+- **In RomM:** one **single-file `<name>.squashfs`** on RomM's `linux` platform,
+  packed from the built folder and its `.ludusavi.yaml` with `romm-shelf native
+  pack FOLDER --squashfs OUT --platform linux [--upload]`. It is the same
+  deterministic archive as a Windows game (`zstd`, 1 MiB blocks, root-owned,
+  zeroed timestamps); the program must be executable. `--upload` creates the
+  `linux` platform when RomM has none,
+  uploads that one file, waits for the scan and applies the manifest's
+  `romm-shelf.metadata`, so the entry is named from the manifest rather than the
+  file name. A folder ROM (the older layout) still installs and plays; new games
+  use squashfs. The archive contains the game, so it's for the user's own private
+  server and is never made public.
 - **The manifest:** `.ludusavi.yaml` is ludusavi's secondary-manifest format
   (<https://github.com/mtkennerly/ludusavi-manifest>). Its `files` list says where
   the game keeps saves; entries tagged `save` sync and `config` entries don't,
-  because config is per machine. Paths are templates: `<base>` is the installed
-  game folder, and `<home>`, `<xdgData>` and `<xdgConfig>` are ludusavi's Linux
-  placeholders. A small `romm-shelf` key in the same entry says what to run
-  (`program`, and optionally `args`; ludusavi's `launch.arguments` is the
-  fallback), and may carry `metadata` (`name`, `summary`) for the game's RomM
-  entry.
-  A relative path (`./…`, `../…`) is ignored, as the format requires. Windows games
-  use the same mechanism, with the extra rules below.
+  because config is per machine. Paths are templates. A small `romm-shelf` key in
+  the same entry says what to run (`program`, and optionally `args` and
+  `workdir`; ludusavi's `launch.arguments` is the fallback), and may carry
+  `metadata` (`name`, `summary`) for the game's RomM entry. Entries marked
+  `when: os: linux` apply; other systems' entries are ignored, as Windows ignores
+  Linux ones. A relative path (`./…`, `../…`) is ignored, as the format requires.
 - **No per-game code:** nothing about a particular game is in romm-shelf. The
   `romm_shelf_recomp` package and the `romm_shelf.natives` entry-point group are
   gone; the manifest travels with the game in RomM.
-- **Install:** `romm-shelf get` unpacks the folder ROM to `roms/linux/<name>/`,
-  keeping executable permissions. Matching stays stateless: a local
-  `roms/linux/<name>/` matches the RomM ROM `<name>`.
-- **Saves:** the manifest decides where they are, so they are not moved into
-  `saves/linux/<name>/`. Paths and placeholders follow ludusavi: a path is a glob,
-  a path naming a folder includes it recursively, and relative paths are ignored.
-  Each manifest path is a save slot whose name comes from the path template; a
-  glob's slot also carries the matched path under the glob's base, so a device
-  with no local copy can put a downloaded save back. A folder save is one zip, as
-  for any other emulator. A path inside `<base>` works, but replacing the
-  installed build then loses that save. Backups go under `saves/`. Only installed
-  games are handled: a game that isn't installed has no local manifest, so its
-  saves are not discovered.
-- **Launching:** `romm-shelf play <rom>` pulls that game's saves, runs the program
-  the manifest names, and pushes when it exits. The Steam shortcut
-  (`romm-shelf shortcut <rom>`) points at that, because a Steam launch runs no
-  ES-DE hooks. The sync before sleep covers these saves too. If the pull fails (no
-  network), it warns and runs the game anyway, as the hooks do.
+- **Install:** the archive goes to `roms/linux/<name>.squashfs`, exactly where
+  RomM keeps it, so path matching is unchanged. A legacy folder ROM still unpacks
+  to `roms/linux/<name>/` and matches the same way.
+- **Saves:** each manifest path is a save slot whose name comes from the path
+  template; a glob's slot also carries the matched path under the glob's base, so
+  a device with no local copy can put a downloaded save back. Linux placeholders
+  resolve into a per-game tree, which bubblewrap makes the game's `$HOME`:
+
+  ```
+  saves/linux/<name>/profile/   -> $HOME inside the run (bwrap bind)
+  saves/linux/<name>/base/      -> overlay upper layer for writes next to the program
+  ```
+
+  `<home>` is `profile/`; `<xdgData>` and `<xdgConfig>` are
+  `profile/.local/share` and `profile/.config`; `<osUserName>` is the real user;
+  `<base>` is the overlay upper, as for Windows. A folder save is one zip, as for
+  any other emulator. Paths using placeholders outside that list (including
+  `<root>`) are skipped, like Windows' `<storeUserId>`. Only installed games are
+  handled: a game that isn't installed has no local manifest, so its saves are not
+  discovered. Legacy folder games keep their old real paths, so their existing
+  saves stay where they are.
+- **Launching:** `romm-shelf play <rom>` pulls that game's saves, mounts the
+  archive read-only with `squashfuse`, gives the game a writable bubblewrap
+  overlay, binds the per-game profile over `$HOME`, runs the manifest's program,
+  and pushes the saves when it exits. The overlay is mounted under
+  `XDG_RUNTIME_DIR`, outside `$HOME`, so the profile bind cannot hide it. The
+  runner is `ROMM_SHELF_NATIVE_RUNNER`
+  when set; otherwise none when Steam already supplied a runtime
+  (`STEAM_RUNTIME`/`PRESSURE_VESSEL_RUNTIME`), then `steam-run` (NixOS), then a
+  Steam Linux Runtime installation (`SteamLinuxRuntime_sniper`, `_soldier` or
+  `SteamLinuxRuntime`), then direct. The Steam shortcut (`romm-shelf shortcut
+  <rom>`) points at `play`, because a Steam launch runs no ES-DE hooks. The sync
+  before sleep covers these saves too. If the pull fails (no network), it warns and
+  runs the game anyway, as the hooks do. On NixOS a **Steam-launched** `play`
+  cannot mount the archive: Steam starts its children with `NoNewPrivs=1`, so the
+  setuid `fusermount3` is ignored and FUSE refuses the mount. The supported route
+  for now is `romm-shelf play` from a shell; the UI's server runs that itself for
+  these games (todo.md).
 - **Metadata:** a scan can't identify these, because no metadata source lists them
   as Linux releases. `romm-shelf native metadata <rom> --from <switch rom> [--plan]`
   copies everything from the same game's Switch release in RomM: IDs, text, cover
   and the raw source data. It keeps the ROM's own file name. Do it before the
   Switch release is removed: the recomp is then the single source of truth.
-- **Not proven yet:** that a build runs after moving to another path and another
-  machine. The projects' docs say the folders are portable, but no moved build has
-  been run yet. Test that before uploading anything.
+  `native pack --upload` applies a manifest's `romm-shelf.metadata` automatically.
+- **Not proven yet:** on the Deck, that the nested bwrap/`steam-run` path works,
+  that the Steam Linux Runtime entry point is the right one for a non-Steam
+  shortcut, and that binding the profile over `$HOME` doesn't break a game that
+  needs shared host data. The two installed folder ROMs were repacked as
+  squashfs on 2026-11-08.
 
 ### Windows games (Proton)
 
-*Added 2026-11-07 (owner): the Windows equivalent of the native path, for
-semi-portable installs. NixOS first; the AppImage privilege issue is separate.
-Packed and played on NixOS with Quake Brutalist Jam 3: Proton ran inside bwrap
-over squashfuse, the overlay accepted writes, and the manifest found the save.
-Uploaded to RomM as ROM 2998; its save round-tripped (upload and restore). See
-[winapps.md](winapps.md) for the step-by-step recipe.*
+*Added 2026-11-07 (owner) for semi-portable Windows installs; since 2026-11-08
+the same packaged-game engine also runs Linux native games (§ Native games), with
+Proton replaced by a Steam runtime wrapper. NixOS first; the AppImage privilege
+issue is separate. Packed and played on NixOS with Quake Brutalist Jam 3: Proton
+ran inside bwrap over squashfuse, the overlay accepted writes, and the manifest
+found the save. Uploaded to RomM as ROM 2998; its save round-tripped (upload and
+restore). See [winapps.md](winapps.md) for the step-by-step recipe.*
 
 - **In RomM:** one **single-file `<name>.squashfs`** on RomM's `win` platform. The
   built game folder and its `.ludusavi.yaml` are packed with `romm-shelf native
-  pack FOLDER --squashfs OUT [--upload] [--plan]`: it validates the manifest and
-  `romm-shelf.program`, then runs a deterministic `mksquashfs` (`zstd` at its
-  highest level, 1 MiB blocks, root-owned, zeroed timestamps). `--upload` creates
+  pack FOLDER --squashfs OUT --platform win [--upload] [--plan]` (`win` is the
+  default): it validates the manifest and `romm-shelf.program`, then runs a
+  deterministic `mksquashfs` (`zstd` at its highest level, 1 MiB blocks,
+  root-owned, zeroed timestamps). `--upload` creates
   the platform if RomM has none, uploads that one file, waits for RomM's scan and
   applies the manifest's `romm-shelf.metadata`, so the entry is named from the
   manifest rather than the file name. RomM scans it into the library as usual.
@@ -1257,6 +1340,10 @@ shortcut. Screens:
     server keeps the covers it has served in memory (64 MB, least recently used
     first out). It asks RomM for its library pages four at a time: 4 s for 2,800
     games, against 11 s one page after another.
+  - **RomM changes while the shelf is open.** The matched library is kept in memory
+    for a minute, then RomM is asked again; the UI also re-asks when it regains
+    focus. A ROM added or removed on the server shows up without a restart. Y
+    refreshes at once.
 - **Game page:** opens at once with what the card knows. The summary and saves fill
   in after. It shows cover, metadata, size, Download or Remove, and the game's
   pending sync steps with Sync now.
@@ -1365,14 +1452,14 @@ romm-shelf get <rom>                 # download
 romm-shelf rm <rom> [--push-saves]
 romm-shelf sync [--rom R] [--plan] [--confirm]
 romm-shelf play <rom> [--plan]       # installed game (native or bundled emulator): pull saves, run, push saves
-romm-shelf native metadata <rom> --from <switch rom> [--plan]  # copy a Switch release's metadata onto a folder game
-romm-shelf native pack FOLDER --squashfs OUT [--upload] [--plan]  # Windows game: build/upload one squashfs ROM
+romm-shelf native metadata <rom> --from <switch rom> [--plan]  # copy a Switch release's metadata onto a native game
+romm-shelf native pack FOLDER --squashfs OUT [--platform linux|win] [--upload] [--plan]  # build/upload one squashfs ROM
 romm-shelf patches [--game G | --emulator E]  # system patches; or a game's (or emulator's) scoped ones
 romm-shelf patches settings|set NAME [KEY=VALUE] [--game G | --emulator E] [--unset KEY]
 romm-shelf patches apply [NAME] [--game G | --emulator E] [--plan]  # system patches, or one target's
 romm-shelf serve                     # the background service: hook endpoint, sync before sleep
 romm-shelf gyro [--device D]         # the Deck's motion sensor as a DSU server (what the gyro patch runs)
-romm-shelf ui                        # full-screen UI (Firefox kiosk) with its own server while open
+romm-shelf ui                        # full-screen UI (Firefox kiosk; Flatpak preferred) with its own server while open
 romm-shelf shortcut [<rom>] [--plan] # app menu entry + Steam shortcut: the UI, or one game through play
 romm-shelf steam sync [--game G] [--plan] [--restart-steam]  # games' Steam entries to match the settings
 romm-shelf steam restart [--plan]    # restart Steam, taking out entries that should go while it's closed

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from romm_shelf import mods
 from romm_shelf.adapters import DiscReader, LocalSave
-from romm_shelf.emulators import content, emulator_home, local_program, steam_overlay_libs
+from romm_shelf.emulators import bundle_entry, content, emulator_home, local_program, steam_overlay_libs
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom
 from romm_shelf.native import RunPlan
@@ -197,7 +197,7 @@ class DolphinEmulator:
                            rom.path.parent, seed={})
         dolphin = bundle / "dolphin"
         program = dolphin / "bin/dolphin-emu"
-        if not program.exists():
+        if not bundle_entry(program):
             raise FileNotFoundError(f"{self.name}: {program} isn't in the bundle")
         user = user_dir()
         config = user / "Config/Dolphin.ini"

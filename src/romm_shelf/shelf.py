@@ -98,7 +98,7 @@ def unpack(part: Path, staging: Path, name: str) -> Path:
 
 
 def uninstall(path: Path) -> None:
-    if path.is_dir():
+    if path.is_dir() and not path.is_symlink():
         shutil.rmtree(path)
     else:
-        path.unlink()
+        path.unlink(missing_ok=True)

@@ -1,8 +1,11 @@
 # GHCR emulator packs
 
-*Written 2026-11-08. Status: design notes, not yet a contract. No spike has been
-run. [docs/design.md](docs/design.md) still governs behaviour; this file is the
-plan for moving emulators out of the AppImage and into OCI images on GHCR.*
+*Written 2026-11-08. Status: the client half is implemented — `src/romm_shelf/packs.py`,
+`romm-shelf packs`, pack-backed `play` under bwrap, and the core no-chroot
+AppImage. The containers themselves (`packaging/packs.nix`, publish scripts) and a
+Deck spike are still to do, so this is not yet a contract.
+[docs/design.md](docs/design.md) still governs behaviour; this file is the plan for
+moving emulators out of the AppImage and into OCI images on GHCR.*
 
 ## Why this exists
 

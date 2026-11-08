@@ -3,7 +3,7 @@
 *Written 2026-11-07. These are notes, not a contract. [docs/design.md](docs/design.md)
 still governs behaviour; this file is about how romm-shelf reaches a machine.*
 
-romm-shelf is deployed five ways:
+romm-shelf is deployed six ways:
 
 | Route | Artifact | Emulators | Who it is for |
 |---|---|---|---|
@@ -12,6 +12,7 @@ romm-shelf is deployed five ways:
 | AppImage | self-updating AppImage | bundled | Steam Deck, plain Linux |
 | uv / PyPI | wheel + sdist | external or RetroDECK | a checkout, a Python user |
 | Docker | OCI image | bundled | RomM's streaming webstation |
+| WSL2 | AppImage + packs | from GHCR packs | Windows, with WSLg's vGPU |
 
 The routes share one build rule: **GitHub Actions installs tools and calls build
 scripts; it does not contain build logic.** A script that works locally is the same
@@ -40,15 +41,16 @@ Measured on azrael, 2026-11-07, from the working tree:
 
 | Piece | Size |
 |---|---|
-| current AppImage (nix-appimage, all bundled emulators) | ~1.8 GB |
+| core AppImage (`.#appimage`, no emulators) | ~59 MB |
+| fat AppImage (`.#appimage-fat`, all bundled emulators) | ~1.8 GB |
 | emulator bundle (`result-emulators`) | ~1.1 GB |
 | RetroArch core set alone | ~929 MB |
 | RetroArch slang shaders | ~75 MB |
 | Python package alone (`result-pkg`) | ~2.2 MB |
 
-GitHub Releases allow 2 GB per asset. The current AppImage is close enough that a
-new emulator can push it over. This is a release-engineering problem, not just a
-download-size problem; see *AppImage payload* below.
+GitHub Releases allow 2 GB per asset. The fat AppImage is close enough that a new
+emulator can push it over; the core AppImage avoids the problem by pulling packs.
+See *AppImage payload* below.
 
 ## Route 1: Nix flake input on another distro
 
@@ -185,31 +187,16 @@ https://github.com/<owner>/romm-shelf/releases/latest/download/latest.json
 Prereleases are release assets too; the stable updater follows
 `releases/latest`, and a `--channel` option is an open decision.
 
-**Two AppImage builders, one decision.** `flake.nix` currently builds `.#appimage`
-with `nix-appimage`, which runs the app inside a user-namespace chroot that binds
-`/nix`. `packaging/appimage.nix` is the no-chroot alternative described in
-design.md. The no-chroot build is required for bwrap/Proton and for Flatpak
-Firefox, but it is not yet standalone with emulators:
+**Two AppImage builders, one taken.** As of 2026-11-08 `.#appimage` is the
+no-chroot `packaging/appimage.nix` build: relocatable Python and wheels, static
+`bwrap`/squashfs tools, and no emulators (~59 MB). `.#appimage-fat` keeps the old
+nix-appimage build as a temporary fallback. The core image is the one required for
+bwrap/Proton and Flatpak Firefox; packs supply the emulators.
 
-- `cp -r ${emulators} AppDir/emulators` preserves symlinks into `/nix/store`;
-- the emulator wrapper scripts exec absolute `/nix/store` paths;
-- the closure therefore has to be dereferenced *and* the wrappers made
-  relocatable (or generated for the bundle) before "needs nothing but FUSE" is
-  true.
-
-Until that is decided, the build script uses the flake's current builder and the
-notes mark the no-chroot build as blocked work.
-
-**AppImage payload.** The 1.8 GB single file is close to GitHub's 2 GB asset
-limit. Options to decide:
-
-1. one fat AppImage (current);
-2. a lean AppImage (core + RetroArch) plus a separate emulator pack;
-3. a fat AppImage on RomM and a lean one on GitHub;
-4. split the release into several assets and reassemble in `update`.
-
-The update path, the release workflow and `latest.json` all change with this
-choice, so it is decided before the first release, not after.
+**AppImage payload.** Emulators are no longer in the AppImage. The client pulls
+one OCI image per emulator from GHCR, and `latest.json` pins each digest. The core
+image is far under GitHub's 2 GB per-asset limit. Open: whether an offline/fat
+AppImage remains; pack update cadence and signing. See todo.md.
 
 **Uninstall:** delete `~/Applications/romm-shelf.AppImage`, the Steam shortcuts
 (`romm-shelf steam sync` can remove romm-shelf's own), and
@@ -397,6 +384,24 @@ and save data are not in the image.
 `docker compose down`; the `/config` volume and the ROM library remain. Remove
 them by hand when no longer wanted.
 
+## Route 6: WSL2 on Windows
+
+*Added 2026-11-08. Written but not yet run on a real WSL2 machine.*
+
+`packaging/wsl/install-wsl.bat` is the Windows entry point; it ensures WSL2 and
+Ubuntu 24.04, calls `packaging/wsl/install-wsl.sh` inside the distribution, then
+restarts WSL so systemd starts and runs the finish phase. The Linux script is
+plan-first (`--plan` changes nothing) and installs the AppImage plus the Mesa,
+FUSE, Vulkan and WSLg prerequisites. It reports `/dev/dxg`, `/dev/dri`,
+`glxinfo` and `vulkaninfo` instead of assuming GPU acceleration worked.
+
+WSLg gives OpenGL through Mesa's `d3d12` driver; Vulkan (Dozen) is not
+guaranteed, while the bundled emulators default to Vulkan. There is no Steam
+client, so Steam Input cannot be used, and gamepads are not passed through by
+default. The UI is served by `romm-shelf serve --ui` and opened in the Windows browser;
+`install-wsl.bat --ui` does both. Details and the owner decisions are in
+[docs/wsl.md](docs/wsl.md) and [todo.md](todo.md).
+
 ## Build architecture
 
 ### Inputs
@@ -404,7 +409,7 @@ them by hand when no longer wanted.
 - `flake.nix`, `flake.lock` — package, emulators, AppImage.
 - `pyproject.toml`, `uv.lock` — Python package and wheel.
 - `packaging/emulators.nix` — emulator bundle and default configs.
-- `packaging/appimage.nix` — no-chroot AppImage (unwired).
+- `packaging/appimage.nix` — the no-chroot core AppImage (`.#appimage`).
 - `packaging/docker/Dockerfile` and `scripts/build-docker.sh` — the streaming
   image, built on the upstream webstation base with the romm-shelf wheel and the
   all-in-one emulator bundle.
@@ -551,9 +556,10 @@ The UI Settings action must call the same core function.
 These are owner decisions and are tracked in [todo.md](todo.md):
 
 - AppImage fixed install path and update channel/prereleases.
-- AppImage builder: keep `nix-appimage` or finish the no-chroot
-  `packaging/appimage.nix` (relocatable emulator wrappers).
-- AppImage payload: one fat file vs lean AppImage + emulator pack.
+- AppImage builder: the core no-chroot image is `.#appimage`; decide whether to
+  keep `.#appimage-fat` (nix-appimage) as an offline fallback.
+- AppImage payload: core image plus GHCR packs is implemented; decide pack update
+  cadence, signing, and whether an offline fat image remains.
 - NixOS module vs package documentation only; stable program path for units.
 - PyPI project ownership, trusted publisher and first release.
 - Docker streaming: upstream broker fork/patch ownership, version pinning, and

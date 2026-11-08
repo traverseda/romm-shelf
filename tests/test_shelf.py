@@ -32,6 +32,10 @@ def test_single_file_install_and_uninstall(layout):
     assert not plan.target.exists()
 
 
+def test_uninstall_ignores_a_file_that_is_already_gone(tmp_path):
+    shelf.uninstall(tmp_path / "gone.iso")
+
+
 def test_failed_download_leaves_nothing(layout):
     plan = shelf.install_plan(rom(77, "ps2", "Game.iso"), layout)
     with pytest.raises(ConnectionError):

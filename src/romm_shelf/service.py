@@ -9,7 +9,7 @@ from romm_shelf.adapters import Adapter, DiscReader, LocalSave
 from romm_shelf.auth import Session
 from romm_shelf.execute import Step, plan_saves, plan_states, run
 from romm_shelf.layout import RetroDeckLayout
-from romm_shelf.library import LocalRom, match, scan_local
+from romm_shelf.library import LocalRom, match, remember, scan_local
 from romm_shelf.romm import Rom, RommClient
 from romm_shelf.sync import inventory, negotiate_payload
 
@@ -52,6 +52,8 @@ def sync_roms(
     with SYNC_LOCK:
         remote = list(remote if remote is not None else client.roms())
         m = match(scan_local(layout.roms), remote)
+        if not plan_only:  # a plan changes nothing, not even the cache
+            remember(m.matched)
         matched = [(l, r) for l, r in m.matched if rom_ids is None or r.id in rom_ids]
         in_scope = [r for r in remote if rom_ids is None or r.id in rom_ids]
         locals_by_id = {r.id: l for l, r in matched}

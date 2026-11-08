@@ -141,7 +141,7 @@ class Rpcs3Emulator:
     """Run on top of the default when RPCS3 is first set up (design.md § Patches)."""
 
     def run_plan(self, rom: LocalRom, layout: RetroDeckLayout, bundle: Path, runtime: Path) -> RunPlan:
-        from romm_shelf.emulators import local_program, steam_overlay_libs
+        from romm_shelf.emulators import bundle_entry, local_program, steam_overlay_libs
         from romm_shelf.patches import SETTINGS_PATCH, values
         chosen = values(SETTINGS_PATCH)
         game = game_path(rom)
@@ -152,7 +152,7 @@ class Rpcs3Emulator:
             return RunPlan(program, (*extra, *args), pads, rom.path.parent, seed={})
         rpcs3 = bundle / "rpcs3"
         program = rpcs3 / "bin/rpcs3"
-        if not program.exists():
+        if not bundle_entry(program):
             raise FileNotFoundError(f"{self.name}: {program} isn't in the bundle")
         home = user_dir()
         saves, states = saves_root(layout), states_root(layout)

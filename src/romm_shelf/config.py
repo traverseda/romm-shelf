@@ -42,10 +42,40 @@ def program() -> str:
     return str(Path(sys.argv[0]).resolve())
 
 
+def play_log(rom_id: int) -> Path:
+    """The per-game log `play` writes: a Steam or UI launch has no terminal to show an error on."""
+    root = (Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+            / "romm-shelf" / "logs")
+    root.mkdir(parents=True, exist_ok=True)
+    return root / f"play-{rom_id}.log"
+
+
 def host_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """This process's environment without the AppImage runtime's variables, for programs it starts."""
     env = {k: v for k, v in os.environ.items() if k not in APPIMAGE_ENV and not k.startswith("APPIMAGE_")}
     return {**env, **(extra or {})}
+
+
+TOOL_ENV = ("LD_PRELOAD", "LD_LIBRARY_PATH")
+SETUID_BIN = ("/run/wrappers/bin", "/usr/bin", "/bin")
+"""Where a host keeps its setuid helpers. NixOS puts fusermount3 at /run/wrappers/bin, never in the
+system profile, and squashfuse looks it up on PATH: the profile's copy is not setuid and every mount
+fails with "Operation not permitted"."""
+
+
+def tool_env() -> dict[str, str]:
+    """This process's environment for romm-shelf's own helper programs (unsquashfs, squashfuse, …).
+
+    A shortcut started by Steam preloads its overlay into every process, and that overlay's search
+    path doesn't fit a Nix binary: `unsquashfs` aborts before main() when it is injected. The game
+    itself keeps Steam's environment; only the tools that unpack and mount its archive drop it.
+    The setuid helper directories come first so squashfuse finds a fusermount3 that can mount."""
+    env = {k: v for k, v in os.environ.items() if k not in TOOL_ENV}
+    path = [p for p in SETUID_BIN if Path(p).is_dir()]
+    if current := env.get("PATH"):
+        path.append(current)
+    env["PATH"] = ":".join(path)
+    return env
 
 
 class Settings(BaseSettings):

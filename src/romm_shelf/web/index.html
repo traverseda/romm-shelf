@@ -669,9 +669,12 @@ const app = createApp({
     const watchJobs = pollActivity;
     const jobColor = (j) => ({ running: "primary", done: "positive", failed: "negative" })[j.status];
     function jobDetail(j) {
-      if (j.kind === "play")
-        return [j.status === "running" ? "opening in Steam" : j.status === "done" ? "Steam is running it" : "",
-                j.error].filter(Boolean).join(" · ");
+      if (j.kind === "play") {
+        const how = j.via === "direct" ? "starting it" : "opening in Steam";
+        const done = j.via === "direct" ? "romm-shelf is running it" : "Steam is running it";
+        return [j.status === "running" ? how : j.status === "done" ? done : "", j.error]
+          .filter(Boolean).join(" · ");
+      }
       const amount = j.unit === "bytes" ? `${size(j.done)} of ${size(j.total)}`
         : j.total ? `${j.done} of ${j.total} files` : j.status === "running" ? "" : "nothing to do";
       const failed = j.log.filter((l) => l.error).length;
@@ -705,8 +708,10 @@ const app = createApp({
       await nextTick(); focusFirst();
     }
 
-    // Play: opens the game's own Steam app (added when it was installed; `romm-shelf play <rom>`), so
-    // Steam owns its window and gives it its own Steam Input profile (design.md § Controller rule).
+    // Play: a packaged game (native folder or squashfs) runs `romm-shelf play` from this server,
+    // outside Steam, which can't mount its archive (todo.md). Every other game opens its own Steam
+    // app, so Steam owns its window and gives it its own Steam Input profile (design.md § Controller
+    // rule). The API says which with `via`.
     const playJob = ref(null);
     // A bare 404 for an /api/ route is the static-file fallback: the server is from another build,
     // not a missing game. Say so instead of "Not Found".
@@ -724,7 +729,8 @@ const app = createApp({
         const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
         if (!res.ok) { message.value = `Can't play: ${apiError(body, res)}`; return; }
         playJob.value = body.id;
-        message.value = "Opening in Steam… (the first time, Steam adds it to your library)";
+        message.value = body.via === "direct" ? "Starting the game…"
+                                              : "Opening in Steam… (the first time, Steam adds it to your library)";
         watchJobs();
       } catch (e) { message.value = `Can't play: ${e}`; }
     }
@@ -968,20 +974,35 @@ const app = createApp({
     const platforms = computed(() => lib.value.platforms);
     const tabs = computed(() => [ALL, ...platforms.value.map((p) => p.slug), ACTIVITY, PATCHES, BIOS]);
 
+    function applyLibrary(data) {
+      lib.value = data;
+      const withGames = data.platforms.find((p) => p.on_device) || data.platforms[0];
+      if (![ALL, BIOS, ACTIVITY, PATCHES].includes(platform.value) && !data.platforms.some((p) => p.slug === platform.value)) platform.value = withGames?.slug ?? ALL;
+    }
     async function load(refresh = false) {
       loading.value = true; error.value = null;
       try {
         const res = await fetch(`/api/library${refresh ? "?refresh=true" : ""}`);
         if (!res.ok) throw new Error(`library: HTTP ${res.status}`);
-        lib.value = await res.json();
-        const withGames = lib.value.platforms.find((p) => p.on_device) || lib.value.platforms[0];
-        if (![ALL, BIOS, ACTIVITY, PATCHES].includes(platform.value) && !lib.value.platforms.some((p) => p.slug === platform.value)) platform.value = withGames?.slug ?? ALL;
+        applyLibrary(await res.json());
       } catch (e) { error.value = String(e); }
       loading.value = false;
       loadSyncStatus(refresh);
       await nextTick();
       if (!document.activeElement?.closest("[data-nav]")) focusGrid();
     }
+    // RomM can change while the shelf is open (a ROM added or removed elsewhere). The server keeps
+    // the library in memory for a minute; ask again now and then and on return, without disturbing
+    // the view or stealing focus.
+    async function refreshLibrary(force = false) {
+      if (loading.value || detailOpen.value || document.hidden) return;
+      try {
+        const res = await fetch(`/api/library${force ? "?refresh=true" : ""}`);
+        if (res.ok) applyLibrary(await res.json());
+      } catch { /* daemon restarting; the next try */ }
+    }
+    setInterval(refreshLibrary, 60_000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshLibrary(true); });
 
     window.addEventListener("nav-search", () => {
       if (detailOpen.value) return;

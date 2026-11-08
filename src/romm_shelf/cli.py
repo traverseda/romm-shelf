@@ -1,6 +1,7 @@
 """Command line interface. Every UI action has a command here (design.md § Parity)."""
 
 import json
+import os
 import sys
 from collections import Counter
 from collections.abc import Callable
@@ -13,11 +14,11 @@ from loguru import logger
 
 from romm_shelf.adapters import DiscReader, load_adapters
 from romm_shelf.auth import device_login, load_session, save_credentials
-from romm_shelf.config import Settings, program
+from romm_shelf.config import Settings, play_log, program
 from romm_shelf.layout import RetroDeckLayout
-from romm_shelf.library import LocalRom, match, name_matches, scan_local
+from romm_shelf.library import LocalRom, match, name_matches, recall, remember, scan_local
 from romm_shelf.romm import Rom
-from romm_shelf import bios, media, mods, native, patches, player, proton, steam
+from romm_shelf import bios, media, mods, native, packs, patches, player, proton, steam
 from romm_shelf.service import rom_for_path, sync_roms
 from romm_shelf.sync import inventory, negotiate_payload
 
@@ -97,6 +98,8 @@ def list_roms(
 def serve(
     ui: Annotated[bool, typer.Option("--ui", help="The UI's server (what `ui` runs), not the background service")]
         = False,
+    host: Annotated[str, typer.Option("--host", help="Address to bind")] = "127.0.0.1",
+    port: Annotated[int | None, typer.Option("--port", help="Port to bind (the service's, or the UI's with --ui)")] = None,
 ):
     """Run the background service on 127.0.0.1: the ES-DE hook endpoint and sync before sleep."""
     import uvicorn
@@ -104,8 +107,9 @@ def serve(
     from romm_shelf.server import create_app
 
     settings = Settings()
-    uvicorn.run(create_app(settings, ui=ui), host="127.0.0.1",
-                port=settings.ui_port if ui else settings.port, log_level="info")
+    uvicorn.run(create_app(settings, ui=ui), host=host,
+                port=port if port is not None else (settings.ui_port if ui else settings.port),
+                log_level="info")
 
 
 @app.command("gyro")
@@ -128,7 +132,9 @@ def gyro_serve(
 # The profile is browser cache only; deleting it loses nothing.
 # Firefox finds gamepads through udev, which its sandbox doesn't expose; this
 # grants it for this launch only, leaving the user's Firefox permissions alone.
-FIREFOX = ["flatpak", "run", "--filesystem=/run/udev:ro", "org.mozilla.firefox"]
+FLATPAK_FIREFOX = ["flatpak", "run", "--filesystem=/run/udev:ro", "org.mozilla.firefox"]
+FLATPAK_PROFILE = Path("~/.var/app/org.mozilla.firefox/data/romm-shelf-profile").expanduser()
+NATIVE_PROFILE = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser() / "romm-shelf/firefox-profile"
 FIREFOX_PREFS = {
     "browser.aboutwelcome.enabled": "false",
     "browser.shell.checkDefaultBrowser": "false",
@@ -145,6 +151,21 @@ FIREFOX_PREFS = {
     "dom.gamepad.enabled": "true",
     "browser.cache.disk.enable": "false",
 }
+
+
+def _firefox() -> tuple[list[str], Path]:
+    """The installed Firefox and the profile it can read: the Flatpak when there is one, else the host's."""
+    import shutil
+    import subprocess
+
+    if shutil.which("flatpak"):
+        installed = subprocess.run(["flatpak", "info", "org.mozilla.firefox"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if installed.returncode == 0:
+            return [*FLATPAK_FIREFOX], FLATPAK_PROFILE
+    if native := shutil.which("firefox"):
+        return [native], NATIVE_PROFILE
+    raise typer.Exit("no Firefox found: install the Flatpak (org.mozilla.firefox) or firefox")
 
 
 def _daemon_up(url: str) -> bool:
@@ -246,8 +267,8 @@ def ui():
         else:
             server.terminate()
             raise typer.Exit(f"the UI's server isn't answering on {url}")
-    # Inside Firefox's own Flatpak data folder: the sandbox can't see the rest of home.
-    profile = Path("~/.var/app/org.mozilla.firefox/data/romm-shelf-profile").expanduser()
+    # The Flatpak's own data folder when that is the Firefox in use: its sandbox can't see the rest of home.
+    firefox, profile = _firefox()
     profile.mkdir(parents=True, exist_ok=True)
     # The cache too: everything is served from this machine, and a stale nav.js once
     # survived several updates.
@@ -257,7 +278,7 @@ def ui():
         shutil.rmtree(stale) if stale.is_dir() else stale.unlink(missing_ok=True)
     (profile / "user.js").write_text("".join(f'user_pref("{k}", {v});\n' for k, v in FIREFOX_PREFS.items()))
     try:
-        subprocess.run([*FIREFOX, "--kiosk", "--no-remote", "--profile", str(profile), url])
+        subprocess.run([*firefox, "--kiosk", "--no-remote", "--profile", str(profile), url])
     finally:
         if server is not None:
             server.terminate()
@@ -287,7 +308,9 @@ def shortcut(
         _steam_shortcut("romm-shelf", "RomM Shelf", "Browse your RomM library and sync saves", "ui", plan)
         return
     (settings, _, client, layout), local, rom = _installed(rom_id)
-    _run_plan(settings, layout, local, rom)  # refuse a game nothing here can run
+    _run_plan(settings, layout, local)  # refuse a game nothing here can run
+    if rom is None:
+        raise typer.BadParameter("RomM is unreachable: try adding the Steam shortcut once it's back")
     _game_shortcut(rom, client, plan)
 
 
@@ -315,7 +338,8 @@ def _installed(rom_id: int):
     """(context, the local game, its RomM ROM), or a clear error.
 
     Asks RomM for this one ROM, not the whole library: that's 0.1 s instead of several seconds,
-    and `play` runs this before the game starts."""
+    and `play` runs this before the game starts. With no connection the ROM is None and the local
+    game comes from the launch index, so an installed game still runs (design.md § Offline)."""
     import httpx
 
     context = _context()
@@ -326,15 +350,22 @@ def _installed(rom_id: int):
         if e.response.status_code == 404:
             raise typer.BadParameter(f"no ROM {rom_id} in RomM")
         raise
+    except httpx.HTTPError as e:  # RomM unreachable: run the local copy, sync when it's back
+        local = recall(rom_id, layout.roms)
+        if local is None:
+            raise typer.BadParameter(f"ROM {rom_id}: RomM is unreachable and no local copy is known ({e})") from e
+        logger.warning("RomM is unreachable: running {} from the local copy; saves stay local", local.name)
+        return context, local, None
     local = next((l for l, _ in match(scan_local(layout.roms), [rom]).matched), None)
     if local is None:
         raise typer.BadParameter(f"ROM {rom_id} is not on this device")
+    remember([(local, rom)])
     return context, local, rom
 
 
-def _run_plan(settings: Settings, layout, local, rom) -> native.RunPlan:
+def _run_plan(settings: Settings, layout, local) -> native.RunPlan:
     try:
-        return player.run_plan(settings, layout, local, rom)
+        return player.run_plan(settings, layout, local)
     except player.NotPlayable as e:
         raise typer.BadParameter(str(e))
 
@@ -345,37 +376,71 @@ def play(
     plan: Annotated[bool, typer.Option("--plan", help="Print what would run; change nothing")] = False,
 ):
     """Run an installed game: pull its saves, run it, push its saves. What its Steam shortcut runs."""
-    (settings, session, client, layout), local, rom = _installed(rom_id)
-    remote = [rom]  # the sync only looks at this game
-    run = _run_plan(settings, layout, local, rom)
-    if plan:
-        for line in player.plan_lines(rom, run):
-            typer.echo(line)
-        return
-    adapters = load_adapters()
+    log = None
+    sink = None
+    path = None
+    if not plan:  # --plan changes nothing, so it writes no log either
+        path = play_log(rom_id)
+        log = path.open("w", buffering=1)
 
-    def save_sync(restore: bool, what: str) -> None:
-        try:  # no network mustn't stop the game: its saves stay on disk and sync next time
-            result = sync_roms(session, client, layout, adapters, [rom_id], restore=restore, remote=remote)
-            if result.failed:
-                logger.warning("{}: {} of {} steps failed", what, result.failed, len(result.steps))
-        except Exception as e:
-            logger.warning("{} failed: {}", what, e)
+        def write(message) -> None:
+            log.write(str(message))
+            log.flush()
 
-    save_sync(True, "pulling saves")
-    native.prepare(run)
-    for name in run.patches:  # the emulator's first setup: its default is copied, now patch it
-        failed = [r for r in patches.apply(settings, name) if r.status == "failed"]
-        if failed:
-            raise typer.Exit(f"patch {name} failed: {'; '.join(r.describe() for r in failed)}")
-    code = native.launch(run)
-    save_sync(False, "pushing saves")
-    # A game set to be in Steam only while playing had a temporary entry; take it out again.
-    key = f"{local.system}/{local.name}"
-    game = steam.Game(rom_id, rom.name or rom.fs_name_no_ext, key, steam.wanted(key))
-    for change, error in steam.execute(steam.plan([game], only={rom_id}), adds=False):
-        logger.info("{}{}", change.describe(), f" FAILED: {error}" if error else "")
-    raise typer.Exit(code)
+        sink = logger.add(write, level="DEBUG", format="{time:HH:mm:ss.SSS} {level: <8} {message}",
+                          backtrace=True)
+        logger.info("play {}: starting; log {}", rom_id, path)
+    try:
+        (settings, session, client, layout), local, rom = _installed(rom_id)
+        name = rom.name or rom.fs_name_no_ext if rom is not None else local.path.stem or local.name
+        remote = [rom] if rom is not None else None  # the sync only looks at this game
+        run = _run_plan(settings, layout, local)
+        if plan:
+            for line in player.plan_lines(name, run, offline=rom is None):
+                typer.echo(line)
+            return
+        logger.debug("play {}: {} at {}", rom_id, local.system, local.path)
+        adapters = load_adapters()
+
+        def save_sync(restore: bool, what: str) -> None:
+            if rom is None:  # no connection: the saves stay on disk and go up next time (design.md § Offline)
+                logger.warning("RomM is unreachable: not {}; saves stay local", what)
+                return
+            try:  # no network mustn't stop the game: its saves stay on disk and sync next time
+                result = sync_roms(session, client, layout, adapters, [rom_id], restore=restore, remote=remote)
+                if result.failed:
+                    logger.warning("{}: {} of {} steps failed", what, result.failed, len(result.steps))
+            except Exception as e:
+                logger.warning("{} failed: {}", what, e)
+
+        save_sync(True, "pulling saves")
+        native.prepare(run)
+        for patch in run.patches:  # the emulator's first setup: its default is copied, now patch it
+            failed = [r for r in patches.apply(settings, patch) if r.status == "failed"]
+            if failed:
+                logger.error("patch {} failed: {}", patch, "; ".join(r.describe() for r in failed))
+                raise typer.Exit(f"patch {patch} failed: {'; '.join(r.describe() for r in failed)}")
+        # A Steam launch's stderr goes nowhere: keep the program's own output in the log.
+        code = native.launch(run, output=None if sys.stderr.isatty() else log)
+        logger.info("play {}: exit {}", rom_id, code)
+        save_sync(False, "pushing saves")
+        # A game set to be in Steam only while playing had a temporary entry; take it out again.
+        key = f"{local.system}/{local.name}"
+        game = steam.Game(rom_id, name, key, steam.wanted(key))
+        for change, error in steam.execute(steam.plan([game], only={rom_id}), adds=False):
+            logger.info("{}{}", change.describe(), f" FAILED: {error}" if error else "")
+        raise typer.Exit(code)
+    except typer.Exit:
+        raise
+    except BaseException:
+        logger.exception("play {}: failed", rom_id)
+        raise
+    finally:
+        if sink is not None:
+            logger.info("play {}: log at {}", rom_id, path)
+            logger.remove(sink)
+        if log is not None:
+            log.close()
 
 
 @app.command()
@@ -664,17 +729,18 @@ def native_pack(
     folder: Path,
     squashfs: Annotated[Path, typer.Option("--squashfs", help="Write the archive here")],
     upload: Annotated[bool, typer.Option("--upload", help="Upload it to RomM as one single-file ROM")] = False,
-    platform: Annotated[str, typer.Option(help="RomM platform fs_slug to upload to")] = proton.PLATFORM,
+    platform: Annotated[str, typer.Option(help="RomM platform to pack for: win or linux")] = proton.PLATFORM,
     plan: Annotated[bool, typer.Option("--plan", help="Print what would be packed and uploaded; change nothing")] = False,
 ):
-    """Pack a built Windows game folder, with its .ludusavi.yaml, as a squashfs for RomM.
+    """Pack a built native game folder, with its .ludusavi.yaml, as a squashfs for RomM.
 
-    Validates the manifest and program, then writes the archive. --upload creates the platform
-    when missing, uploads the one file and, once RomM has scanned it, applies the manifest's
-    metadata to the entry.
+    Validates the manifest and program, then writes the archive. --platform linux packs a
+    Linux game (run through steam-run or the Steam Linux Runtime); win is the default.
+    --upload creates the platform when missing, uploads the one file and, once RomM has
+    scanned it, applies the manifest's metadata to the entry.
     """
     try:
-        p = proton.pack_plan(folder, squashfs)
+        p = proton.pack_plan(folder, squashfs, platform)
     except (proton.ManifestError, FileExistsError) as e:
         raise typer.BadParameter(str(e))
     typer.echo(p.describe())
@@ -697,6 +763,136 @@ def native_pack(
     if rom is not None:
         typer.echo(f"# applied the manifest's metadata to ROM {rom.id}")
 
+
+
+packs_app = typer.Typer(no_args_is_help=True,
+                        help="Bundled emulator packs: OCI images pulled from GHCR, not shipped in the AppImage.")
+app.add_typer(packs_app, name="packs")
+
+
+def _pack_refs() -> dict[str, packs.PackRef]:
+    try:
+        return packs.remote()
+    except packs.PackError as e:
+        raise typer.BadParameter(str(e))
+
+
+def _installed_packs() -> dict[str, dict]:
+    try:
+        return packs.installed()
+    except packs.PackError as e:
+        raise typer.BadParameter(str(e))
+
+
+@packs_app.command("list")
+def packs_list(
+    remote: Annotated[bool, typer.Option("--remote", help="Also show what the release publishes")] = False,
+):
+    """Which packs are installed, and optionally which ones the release offers."""
+    here = _installed_packs()
+    there = _pack_refs() if remote else {}
+    names = sorted(set(here) | set(there))
+    if not names:
+        typer.echo("# no packs installed")
+        return
+    for name in names:
+        local = here.get(name, {})
+        line = f"{name:10} {local.get('version') or '-':12} {local.get('digest') or '-':20} installed"
+        if remote and name not in here:
+            line = f"{name:10} {'-':12} {'-':20} not installed"
+        if remote and name in there:
+            line += f"  release {there[name].version or there[name].digest}"
+        typer.echo(line)
+
+
+@packs_app.command("install")
+def packs_install(
+    name: str,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would be downloaded; download nothing")] = False,
+):
+    """Install an emulator pack from the release manifest."""
+    ref = _pack_refs().get(name)
+    if ref is None:
+        raise typer.BadParameter(f"no pack {name} in the release manifest")
+    try:
+        p = packs.plan_install(ref)
+    except packs.PackError as e:
+        raise typer.BadParameter(str(e))
+    for line in p.describe():
+        typer.echo(line)
+    if plan:
+        return
+    try:
+        installed = packs.install(ref)
+    except packs.PackError as e:
+        raise typer.BadParameter(str(e))
+    typer.echo(f"# installed {installed.name} {installed.version} ({installed.digest})")
+
+
+@packs_app.command("update")
+def packs_update(
+    name: Annotated[str | None, typer.Argument(help="Only this pack; without one, every installed pack")] = None,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would be downloaded; download nothing")] = False,
+):
+    """Update installed packs to the digests the release manifest names."""
+    refs = _pack_refs()
+    here = _installed_packs()
+    if name is not None and name not in refs:
+        raise typer.BadParameter(f"no pack {name} in the release manifest")
+    names = [name] if name is not None else sorted(here)
+    todo = [n for n in names if n in refs and here.get(n, {}).get("digest") != refs[n].digest]
+    if not todo:
+        typer.echo("# every pack is up to date")
+        return
+    for n in todo:
+        try:
+            p = packs.plan_install(refs[n])
+        except packs.PackError as e:
+            raise typer.BadParameter(str(e))
+        for line in p.describe():
+            typer.echo(line)
+    if plan:
+        return
+    for n in todo:
+        try:
+            installed = packs.install(refs[n])
+        except packs.PackError as e:
+            raise typer.BadParameter(str(e))
+        typer.echo(f"# updated {installed.name} {installed.version} ({installed.digest})")
+
+
+@packs_app.command("remove")
+def packs_remove(
+    name: str,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would change; change nothing")] = False,
+):
+    """Forget an installed pack. Its files stay until `packs prune`."""
+    entry = _installed_packs().get(name)
+    if entry is None:
+        typer.echo(f"# {name} is not installed")
+        return
+    typer.echo(f"remove {name} {entry.get('version') or ''} from the installed list; store paths stay")
+    if plan:
+        return
+    packs.remove(name)
+    typer.echo(f"# removed {name}; run `romm-shelf packs prune` to free its files")
+
+
+@packs_app.command("prune")
+def packs_prune(
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would be removed; remove nothing")] = False,
+):
+    """Remove store paths no installed pack references."""
+    try:
+        p = packs.plan_prune()
+    except packs.PackError as e:
+        raise typer.BadParameter(str(e))
+    for line in p.describe():
+        typer.echo(line)
+    if plan:
+        return
+    packs.prune()
+    typer.echo(f"# removed {len(p.paths)} store path(s)")
 
 
 bios_app = typer.Typer(no_args_is_help=True, help="BIOS/firmware: RomM is the source of truth; devices pull.")

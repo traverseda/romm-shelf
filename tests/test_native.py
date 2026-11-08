@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import httpx
@@ -293,6 +294,16 @@ def test_ensure_platform_creates_it_only_when_missing():
     client, log = _server(platforms=[{"id": 7, "slug": "linux", "fs_slug": "linux", "name": "Linux", "rom_count": 1}])
     assert client.ensure_platform("linux") == 7
     assert log["platforms"] == []
+
+
+def test_launch_can_keep_a_programs_output_that_steam_would_discard(tmp_path):
+    plan = native.RunPlan(Path(sys.executable),
+                          ("-c", "import sys; print('hello'); print('oops', file=sys.stderr)"),
+                          {}, tmp_path, {})
+    log = tmp_path / "play.log"
+    with log.open("w") as output:
+        assert native.launch(plan, output=output) == 0
+    assert "hello" in log.read_text() and "oops" in log.read_text()
 
 
 def test_prepare_clears_a_mount_workdir_and_makes_its_target(tmp_path):

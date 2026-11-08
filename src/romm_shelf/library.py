@@ -1,9 +1,13 @@
 """Matching local ROM files to RomM ROMs.
 
-Nothing is cached on disk: the match is recomputed from the ROM folders and the
-server on every run, as design.md requires.
+The match itself is recomputed from the ROM folders and the server on every run.
+A small launch index (ROM id -> path under roms/) is kept in the cache folder so
+an installed game can be started with no RomM connection; it is rebuilt whenever
+a match is made, so it is a cache, not state (design.md § Offline).
 """
 
+import json
+import os
 import re
 import unicodedata
 from collections.abc import Iterable
@@ -90,3 +94,52 @@ def match(local: Iterable[LocalRom], remote: Iterable[Rom]) -> Match:
             result.local_only.append(rom)
     result.remote_only = [r for k, r in by_path.items() if k not in seen]
     return result
+
+
+CACHE_ENV = "ROMM_SHELF_CACHE_DIR"
+"""Where the launch index lives; the default is $XDG_CACHE_HOME/romm-shelf."""
+
+
+def cache_file() -> Path:
+    if env := os.environ.get(CACHE_ENV):
+        return Path(env).expanduser() / "launch-index.json"
+    return Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser() / "romm-shelf/launch-index.json"
+
+
+def remember(matched: Iterable[tuple[LocalRom, Rom]]) -> None:
+    """Record ROM id -> path under roms/ for the games just matched, so `play` can find them offline.
+
+    Best effort: a cache that can't be written never fails the caller, and losing it only means an
+    offline launch falls back to asking RomM. Merged into the file that is there, so a targeted sync
+    doesn't erase the rest."""
+    try:
+        path = cache_file()
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            data = {}
+        roms = data.setdefault("roms", {})
+        for local, rom in matched:
+            roms[str(rom.id)] = f"{local.system}/{local.name}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}")
+        tmp.write_text(json.dumps({"version": 1, "roms": roms}))
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def recall(rom_id: int, roms_dir: Path) -> LocalRom | None:
+    """The local game last matched to `rom_id`, if the launch index still points at a file there."""
+    try:
+        data = json.loads(cache_file().read_text())
+        relative = (data.get("roms") or {}).get(str(rom_id))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(relative, str):
+        return None
+    system, _, name = relative.partition("/")
+    if not system or not name:
+        return None
+    local = LocalRom(system, roms_dir / system / name)
+    return local if local.path.exists() else None

@@ -48,6 +48,17 @@ def test_find_matches_the_shortcut_steam_added(tmp_path):
         3580912219, "Wizardry", str(desktop))
 
 
+def test_find_prefers_the_exact_desktop_when_two_entries_share_a_name(tmp_path):
+    desktop = steam.desktop_file(1006)
+    stale = steam.desktop_file(3001)
+    shortcut_file(tmp_path, {
+        "0": {"appid": 111, "AppName": "Wizardry", "ShortcutPath": str(stale), "Exe": '"romm-shelf"'},
+        "1": {"appid": 222, "AppName": "Wizardry", "ShortcutPath": str(desktop), "Exe": '"romm-shelf"'},
+    })
+    hit = steam.find(desktop, "Wizardry", roots=(tmp_path,))
+    assert hit is not None and hit.appid == 222
+
+
 def test_find_falls_back_to_our_executable_and_unsigned_appid(tmp_path):
     desktop = steam.desktop_file(1006)
     shortcut_file(tmp_path, {

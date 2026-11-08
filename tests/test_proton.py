@@ -218,7 +218,7 @@ Test Game:
     seen = {}
     monkeypatch.setattr(proton, "tool", lambda name: Path(f"/tools/{name}"))
     monkeypatch.setattr(proton.subprocess, "run",
-                        lambda command, check: seen.update(command=command))
+                        lambda command, check, **kwargs: seen.update(command=command))
     assert proton.pack(plan) == tmp_path / "out.squashfs"
     assert seen["command"][:3] == ["/tools/mksquashfs", str(folder), str(tmp_path / "out.squashfs")]
     assert "-comp" in seen["command"] and "zstd" in seen["command"]

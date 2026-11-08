@@ -1,18 +1,22 @@
-"""Windows native games: a squashfs ROM that runs through Steam Proton.
+"""Packaged native games: a squashfs ROM with a ludusavi manifest, mounted and run.
 
-The game is one single-file `.squashfs` on RomM's `win` platform. Its
-`.ludusavi.yaml` is at the archive root: `files` entries tagged save and marked
-`when: os: windows` say where Windows saves live, and the `romm-shelf` key says
-what to run. The archive is mounted read-only with squashfuse and given a
-writable layer with bubblewrap, so a game may write next to its executable
-without changing the ROM (design.md § Native games, Windows games).
+A game is one single-file `.squashfs` on RomM's `win` (Windows) or `linux`
+(native) platform. Its `.ludusavi.yaml` is at the archive root: `files` entries
+tagged save and marked with the platform's `when: os:` say where saves live, and
+the `romm-shelf` key says what to run. The archive is mounted read-only with
+squashfuse and given a writable layer with bubblewrap, so a game may write next
+to its executable without changing the ROM (design.md § Native games).
 
-Windows save paths resolve into a per-game profile under `saves/win/<game>/`,
-which bubblewrap binds over the Proton prefix. The prefix is disposable, and a
-save can be restored before Proton has ever made it.
+Save paths resolve into a per-game tree under `saves/<platform>/<game>/`.
+Windows games get a per-game profile bound over the Proton prefix and are run
+through Steam Proton. Linux games get a per-game profile bound over `$HOME` and
+run through `steam-run`, the Steam Linux Runtime, or directly when Steam already
+supplied the runtime. Every prefix is disposable, and a save can be restored
+before the game has ever run.
 """
 
 import fnmatch
+import getpass
 import glob
 import os
 import re
@@ -28,22 +32,26 @@ from loguru import logger
 
 from romm_shelf import native, steam
 from romm_shelf.adapters import DiscReader, LocalSave
+from romm_shelf.config import tool_env
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom
 from romm_shelf.native import ManifestError, RunPlan
 from romm_shelf.romm import Rom, RommError
 
 MANIFEST = native.MANIFEST
-PLATFORM = "win"
+WINDOWS = "win"
+LINUX = "linux"
+PLATFORM = WINDOWS
 SUFFIX = ".squashfs"
 EMULATOR = "proton"
 
-# Manifest placeholders that can be resolved on a Proton device. Any other
+# Manifest placeholders that can be resolved on each kind of device. Any other
 # placeholder in a path means the entry cannot be synced safely here.
 PLACEHOLDERS = (
     "<base>", "<home>", "<osUserName>", "<winAppData>", "<winLocalAppData>",
     "<winLocalAppDataLow>", "<winDocuments>", "<winPublic>", "<winProgramData>", "<winDir>",
 )
+LINUX_PLACEHOLDERS = ("<base>", "<home>", "<xdgData>", "<xdgConfig>", "<osUserName>")
 
 
 @dataclass(frozen=True)
@@ -60,6 +68,8 @@ class ProtonGame:
     name: str = ""
     metadata: tuple[tuple[str, str], ...] = ()
     """RomM fields to describe the game, from `romm-shelf.metadata`."""
+    platform: str = WINDOWS
+    """The RomM platform this archive belongs to: `win` or `linux`."""
 
     @property
     def key(self) -> str:
@@ -67,15 +77,32 @@ class ProtonGame:
 
 
 def _tool_dir() -> Path | None:
-    """The bundle's tools, when romm-shelf runs from one (design.md § Distribution)."""
+    """The core AppImage's tools, else the all-in-one bundle's (design.md § Distribution)."""
+    from romm_shelf import packs
+    if tools := packs.tools_dir():
+        return tools
     bundle = os.environ.get("ROMM_SHELF_EMULATORS")
     if bundle and (Path(bundle) / "bin").is_dir():
         return Path(bundle) / "bin"
     return None
 
 
+def _setuid_tool(name: str) -> Path | None:
+    """A host's setuid copy of a helper, if it has one (NixOS puts fusermount3 in /run/wrappers/bin)."""
+    for folder in ("/run/wrappers/bin", "/usr/bin", "/bin"):
+        path = Path(folder) / name
+        try:
+            if path.is_file() and path.stat().st_mode & 0o4000:
+                return path
+        except OSError:
+            pass
+    return None
+
+
 def tool(name: str) -> Path:
     """A bundled tool (bwrap, squashfuse, unsquashfs, mksquashfs) or one on PATH."""
+    if name == "fusermount3" and (host := _setuid_tool(name)) is not None:
+        return host  # unmounting needs setuid; a bundled or profile copy can't do it
     bundled = _tool_dir()
     if bundled is not None and (bundled / name).is_file():
         return bundled / name
@@ -86,14 +113,14 @@ def tool(name: str) -> Path:
 
 
 def is_game(path: Path) -> bool:
-    """Whether this installed ROM is a Windows squashfs game."""
+    """Whether this installed ROM is a packaged squashfs game."""
     return path.is_file() and path.name.lower().endswith(SUFFIX)
 
 
 def _manifest_text(squashfs: Path) -> str:
     result = subprocess.run(
         [str(tool("unsquashfs")), "-cat", str(squashfs), MANIFEST],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=120, env=tool_env(),
     )
     if result.returncode != 0:
         raise ManifestError(f"{squashfs}: no {MANIFEST} ({result.stderr.strip() or result.returncode})")
@@ -115,12 +142,25 @@ def _windows(block: dict) -> bool:
     return not when or any(c.get("os") in (None, "windows") for c in when if isinstance(c, dict))
 
 
-def _supported(template: str, allowed: tuple[str, ...] = PLACEHOLDERS) -> bool:
+def _linux(block: dict) -> bool:
+    when = block.get("when") or ()
+    return not when or any(c.get("os") in (None, "linux") for c in when if isinstance(c, dict))
+
+
+def _applies(block: dict, platform: str) -> bool:
+    return _windows(block) if platform == WINDOWS else _linux(block)
+
+
+def _allowed(platform: str) -> tuple[str, ...]:
+    return PLACEHOLDERS if platform == WINDOWS else LINUX_PLACEHOLDERS
+
+
+def _supported(template: str, platform: str = PLATFORM) -> bool:
     names = re.findall(r"<[^>]+>", template)
-    return bool(names) and all(name in allowed for name in names)
+    return bool(names) and all(name in _allowed(platform) for name in names)
 
 
-def _save_entries(entry: dict) -> tuple[str, ...]:
+def _save_entries(entry: dict, platform: str = PLATFORM) -> tuple[str, ...]:
     files = entry.get("files") or {}
     if not isinstance(files, dict):
         raise ManifestError(f"{MANIFEST}: files has to be a mapping")
@@ -132,7 +172,7 @@ def _save_entries(entry: dict) -> tuple[str, ...]:
         tags = spec.get("tags") or ()
         if tags and "save" not in tags:
             continue  # config is per machine; it doesn't sync
-        if not _windows(spec) or not _supported(template):
+        if not _applies(spec, platform) or not _supported(template, platform):
             continue
         if template.startswith(("./", "../")):
             continue  # ludusavi forbids relative paths
@@ -153,18 +193,18 @@ def _metadata(entry: dict) -> tuple[tuple[str, str], ...]:
     return tuple(metadata.items())
 
 
-def _launch_args(entry: dict) -> tuple[str, ...]:
+def _launch_args(entry: dict, platform: str = PLATFORM) -> tuple[str, ...]:
     launch = entry.get("launch") or {}
     if not isinstance(launch, dict):
         return ()
     for blocks in launch.values():
         for block in blocks or ():
-            if isinstance(block, dict) and block.get("arguments") and _windows(block):
+            if isinstance(block, dict) and block.get("arguments") and _applies(block, platform):
                 return tuple(shlex.split(str(block["arguments"])))
     return ()
 
 
-def squashfs_game(squashfs: Path) -> ProtonGame:
+def squashfs_game(squashfs: Path, platform: str = PLATFORM) -> ProtonGame:
     entry = native.manifest_entry(load_manifest(squashfs), squashfs.stem)
     declared = entry.get("romm-shelf") or {}
     if not isinstance(declared, dict):
@@ -176,8 +216,9 @@ def squashfs_game(squashfs: Path) -> ProtonGame:
     if not isinstance(workdir, str):
         raise ManifestError(f"{MANIFEST}: romm-shelf.workdir has to be text")
     args = tuple(str(a) for a in (declared.get("args") or ()))
-    return ProtonGame(squashfs, program, args or _launch_args(entry), _save_entries(entry),
-                      workdir.strip("/\\"), squashfs.stem, _metadata(entry))
+    return ProtonGame(squashfs, program, args or _launch_args(entry, platform),
+                      _save_entries(entry, platform), workdir.strip("/\\"), squashfs.stem,
+                      _metadata(entry), platform)
 
 
 def program_path(game: ProtonGame) -> str:
@@ -186,7 +227,7 @@ def program_path(game: ProtonGame) -> str:
     if not glob.has_magic(pattern):
         return pattern
     result = subprocess.run([str(tool("unsquashfs")), "-l", str(game.squashfs)],
-                            capture_output=True, text=True, timeout=120)
+                            capture_output=True, text=True, timeout=120, env=tool_env())
     if result.returncode != 0:
         raise ManifestError(f"{game.squashfs}: {result.stderr.strip() or result.returncode}")
     names = [re.sub(r"^squashfs-root/?", "", line.strip()) for line in result.stdout.splitlines()]
@@ -197,8 +238,8 @@ def program_path(game: ProtonGame) -> str:
     return matches[0]
 
 
-# Saving. The Windows placeholders are mapped onto a per-game profile in the layout, which
-# bubblewrap binds over the Proton prefix at launch.
+# Saving. Each platform's placeholders are mapped onto a per-game tree in the layout;
+# bubblewrap binds the profile over the Proton prefix (Windows) or over $HOME (Linux).
 
 def data_home() -> Path:
     return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share").expanduser()
@@ -208,42 +249,57 @@ def runtime_dir() -> Path:
     return Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()) / "romm-shelf"
 
 
-def save_root(layout: RetroDeckLayout, key: str) -> Path:
-    return layout.saves / PLATFORM / key
+def save_root(layout: RetroDeckLayout, key: str, platform: str = PLATFORM) -> Path:
+    return layout.saves / platform / key
 
 
-def overlay_root(layout: RetroDeckLayout, key: str) -> Path:
-    return save_root(layout, key) / "base"
+def overlay_root(layout: RetroDeckLayout, key: str, platform: str = PLATFORM) -> Path:
+    return save_root(layout, key, platform) / "base"
 
 
-def profile_root(layout: RetroDeckLayout, key: str) -> Path:
-    return save_root(layout, key) / "profile"
+def profile_root(layout: RetroDeckLayout, key: str, platform: str = PLATFORM) -> Path:
+    return save_root(layout, key, platform) / "profile"
 
 
-def prefix_root(key: str) -> Path:
-    """STEAM_COMPAT_DATA_PATH: Proton puts its Wine prefix in `pfx/` below this."""
-    return data_home() / "romm-shelf" / "proton" / key
+def prefix_root(key: str, platform: str = PLATFORM) -> Path:
+    """STEAM_COMPAT_DATA_PATH for Windows (Proton puts its Wine prefix in `pfx/` below this);
+    a disposable run folder for Linux."""
+    folder = "proton" if platform == WINDOWS else "native"
+    return data_home() / "romm-shelf" / folder / key
 
 
 def pfx_root(key: str) -> Path:
-    return prefix_root(key) / "pfx"
+    return prefix_root(key, WINDOWS) / "pfx"
 
 
-def mount_root(key: str) -> Path:
-    return runtime_dir() / "proton" / key / "lower"
+def mount_root(key: str, platform: str = PLATFORM) -> Path:
+    return runtime_dir() / platform / key / "lower"
 
 
-def game_dir(key: str) -> Path:
+def game_dir(key: str, platform: str = PLATFORM) -> Path:
     """Where the writable overlay appears inside the run. Outside it is an empty directory;
     bwrap mounts the overlay there, on a path that already exists so nothing is created on the host.
-    Kept under the data folder (not XDG_RUNTIME_DIR) because Proton's container is sure to expose it."""
-    return prefix_root(key) / "game"
+
+    Windows keeps it under the data folder, next to the prefix. A Linux run binds the profile over
+    $HOME, which would hide anything under it, so there the game dir lives under XDG_RUNTIME_DIR
+    instead (outside $HOME)."""
+    if platform == LINUX:
+        return runtime_dir() / platform / key / "game"
+    return prefix_root(key, platform) / "game"
 
 
-def placeholders(path: Path, layout: RetroDeckLayout) -> dict[str, str]:
+def placeholders(path: Path, layout: RetroDeckLayout, platform: str = PLATFORM) -> dict[str, str]:
     key = path.stem
-    saves = save_root(layout, key)
-    profile = profile_root(layout, key)
+    saves = save_root(layout, key, platform)
+    profile = profile_root(layout, key, platform)
+    if platform == LINUX:
+        return {
+            "<base>": str(saves / "base"),
+            "<home>": str(profile),
+            "<xdgData>": str(profile / ".local/share"),
+            "<xdgConfig>": str(profile / ".config"),
+            "<osUserName>": getpass.getuser(),
+        }
     return {
         "<base>": str(saves / "base"),
         "<home>": str(profile),
@@ -258,15 +314,18 @@ def placeholders(path: Path, layout: RetroDeckLayout) -> dict[str, str]:
     }
 
 
-def expand_path(template: str, path: Path, layout: RetroDeckLayout) -> Path:
-    values = placeholders(path, layout)
+def expand_path(template: str, path: Path, layout: RetroDeckLayout,
+                platform: str = PLATFORM) -> Path:
+    values = placeholders(path, layout, platform)
     for placeholder, value in values.items():
         template = template.replace(placeholder, value)
     return Path(os.path.expanduser(template.replace("\\", "/")))
 
 
-def _matches(template: str, path: Path, layout: RetroDeckLayout) -> list[Path]:
-    return sorted(Path(p) for p in glob.glob(str(expand_path(template, path, layout)), recursive=True))
+def _matches(template: str, path: Path, layout: RetroDeckLayout,
+             platform: str = PLATFORM) -> list[Path]:
+    resolved = expand_path(template, path, layout, platform)
+    return sorted(Path(p) for p in glob.glob(str(resolved), recursive=True))
 
 
 def slot_name(template: str, rel: str | None = None) -> str:
@@ -284,11 +343,13 @@ def template_for_slot(game: ProtonGame, slot: str) -> tuple[str, str | None] | N
     return None
 
 
-def save_slots(game: ProtonGame, path: Path, layout: RetroDeckLayout) -> dict[str, Path]:
+def save_slots(game: ProtonGame, path: Path, layout: RetroDeckLayout,
+               platform: str | None = None) -> dict[str, Path]:
+    platform = platform or game.platform
     slots: dict[str, Path] = {}
     for template in game.saves:
-        resolved = expand_path(template, path, layout)
-        matches = _matches(template, path, layout)
+        resolved = expand_path(template, path, layout, platform)
+        matches = _matches(template, path, layout, platform)
         if not glob.has_magic(str(resolved)):
             slots[slot_name(template)] = matches[0] if matches else resolved
         elif matches:
@@ -298,53 +359,64 @@ def save_slots(game: ProtonGame, path: Path, layout: RetroDeckLayout) -> dict[st
     return slots
 
 
-def squashfs_saves(path: Path, layout: RetroDeckLayout) -> list[LocalSave]:
-    """Saves that exist on disk for an installed Windows squashfs game."""
+def squashfs_saves(path: Path, layout: RetroDeckLayout, platform: str = PLATFORM,
+                   emulator: str = EMULATOR) -> list[LocalSave]:
+    """Saves that exist on disk for an installed squashfs game."""
     if not is_game(path):
         return []
     try:
-        game = squashfs_game(path)
+        game = squashfs_game(path, platform)
     except (ManifestError, OSError, subprocess.SubprocessError) as e:  # one bad archive must not stop a sync
-        logger.warning("proton game {}: {}", path, e)
+        logger.warning("{} game {}: {}", platform, path, e)
         return []
-    return [LocalSave(save_path, "save", EMULATOR, slot)
-            for slot, save_path in save_slots(game, path, layout).items() if save_path.exists()]
+    return [LocalSave(save_path, "save", emulator, slot)
+            for slot, save_path in save_slots(game, path, layout, platform).items() if save_path.exists()]
+
+
+def target_for_slot(path: Path, layout: RetroDeckLayout, slot: str | None,
+                    platform: str = PLATFORM) -> Path | None:
+    """Where a downloaded save for this slot goes, from the manifest inside the archive."""
+    if not is_game(path) or not slot:
+        return None
+    try:
+        game = squashfs_game(path, platform)
+    except (ManifestError, OSError, subprocess.SubprocessError):
+        return None
+    found = template_for_slot(game, slot)
+    if found is None:
+        return None
+    template, rel = found
+    resolved = expand_path(template, path, layout, platform)
+    return resolved if rel is None else native.glob_base(resolved) / rel
 
 
 class ProtonAdapter:
-    """Find a squashfs game's saves from the manifest inside the archive."""
+    """Find a Windows squashfs game's saves from the manifest inside the archive."""
 
     name = "proton"
     emulator = EMULATOR
+    platform = WINDOWS
 
     def saves_for(self, rom: LocalRom, layout: RetroDeckLayout) -> list[LocalSave]:
-        return squashfs_saves(rom.path, layout) if rom.system == PLATFORM else []
+        return squashfs_saves(rom.path, layout, self.platform, self.emulator) \
+            if rom.system == self.platform else []
 
     def target_path(self, rom: LocalRom, layout: RetroDeckLayout, kind: str, file_name: str,
                     slot: str | None = None) -> Path | None:
-        if kind != "save" or rom.system != PLATFORM or not is_game(rom.path):
+        if kind != "save" or rom.system != self.platform or not is_game(rom.path):
             return None
-        try:
-            game = squashfs_game(rom.path)
-        except (ManifestError, OSError, subprocess.SubprocessError):
-            return None
-        found = template_for_slot(game, slot) if slot else None
-        if found is None:
-            return None
-        template, rel = found
-        resolved = expand_path(template, rom.path, layout)
-        return resolved if rel is None else native.glob_base(resolved) / rel
+        return target_for_slot(rom.path, layout, slot, self.platform)
 
     def discover(self, remote: list[Rom], layout: RetroDeckLayout,
                  reader: DiscReader) -> tuple[list[tuple[Rom, LocalSave]], list[LocalSave]]:
         paired, unmatched = [], []
         by_name = {(r.platform_fs_slug, r.fs_name): r for r in remote}
-        root = layout.roms / PLATFORM
+        root = layout.roms / self.platform
         if not root.is_dir():
             return paired, unmatched
         for path in sorted(p for p in root.iterdir() if is_game(p)):
-            saves = squashfs_saves(path, layout)
-            if (rom := by_name.get((PLATFORM, path.name))) is not None:
+            saves = squashfs_saves(path, layout, self.platform, self.emulator)
+            if (rom := by_name.get((self.platform, path.name))) is not None:
                 paired.extend((rom, save) for save in saves)
             else:
                 unmatched.extend(saves)
@@ -427,6 +499,34 @@ def proton_command(proton: Proton, env: dict | None = None) -> list[str]:
     return [*runner, str(proton.script)]
 
 
+# Linux runtime. A prebuilt native game needs an FHS-like environment on NixOS, and
+# SteamOS gives one through the Steam Linux Runtime. An explicit prefix wins; then an
+# already-supplied Steam runtime; then steam-run; then a Steam Linux Runtime install.
+
+STEAM_RUNTIMES = ("SteamLinuxRuntime_sniper", "SteamLinuxRuntime_soldier", "SteamLinuxRuntime")
+
+
+def _steam_runtime(roots: tuple[Path, ...] | None = None) -> list[str]:
+    for root in ([p.expanduser() for p in steam.STEAM_ROOTS] if roots is None else roots):
+        for name in STEAM_RUNTIMES:
+            entry = root / "steamapps/common" / name / "run"
+            if entry.is_file():
+                return [str(entry), "--"]
+    return []
+
+
+def native_runner(env: dict | None = None, roots: tuple[Path, ...] | None = None) -> list[str]:
+    """The command prefix that gives a Linux game its runtime, or [] when it runs directly."""
+    environ = os.environ if env is None else env
+    if override := environ.get("ROMM_SHELF_NATIVE_RUNNER"):
+        return shlex.split(override)
+    if environ.get("STEAM_RUNTIME") or environ.get("PRESSURE_VESSEL_RUNTIME"):
+        return []  # already inside a Steam runtime, as when Steam started the shortcut
+    if shutil.which("steam-run", path=environ.get("PATH")):
+        return ["steam-run"]
+    return _steam_runtime(roots)
+
+
 def needs_profile(game: ProtonGame) -> bool:
     return any(name in template for template in game.saves
                for name in ("<home>", "<winAppData>", "<winLocalAppData>", "<winLocalAppDataLow>",
@@ -441,21 +541,20 @@ def needs_programdata(game: ProtonGame) -> bool:
     return any("<winProgramData>" in template for template in game.saves)
 
 
-def run_plan(settings, layout: RetroDeckLayout, path: Path) -> RunPlan:
-    """Mount the squashfs read-only, overlay it, and run the manifest's program through Proton."""
-    game = squashfs_game(path)
-    proton = find_proton()
+def run_plan(settings, layout: RetroDeckLayout, path: Path,
+             platform: str = PLATFORM) -> RunPlan:
+    """Mount the squashfs read-only, overlay it, and run the manifest's program."""
+    game = squashfs_game(path, platform)
     program = program_path(game)
     workdir = (game.workdir or (program.rsplit("/", 1)[0] if "/" in program else "")).strip("/\\")
 
     key = game.key
-    saves = save_root(layout, key)
-    profile = profile_root(layout, key)
-    upper = overlay_root(layout, key)
+    saves = save_root(layout, key, platform)
+    profile = profile_root(layout, key, platform)
+    upper = overlay_root(layout, key, platform)
     work = saves / ".overlay-work"
-    prefix = pfx_root(key)
-    lower = mount_root(key)
-    game_dir_path = game_dir(key)
+    lower = mount_root(key, platform)
+    game_dir_path = game_dir(key, platform)
     mount = native.Mount(
         source=path,
         target=lower,
@@ -470,26 +569,40 @@ def run_plan(settings, layout: RetroDeckLayout, path: Path) -> RunPlan:
 
     args = ["--dev-bind", "/", "/", "--die-with-parent",
             "--overlay-src", str(lower), "--overlay", str(upper), str(work), str(game_dir_path)]
-    if needs_profile(game):
-        args += ["--bind", str(profile), str(prefix / "drive_c/users/steamuser")]
-    if needs_public(game):
-        args += ["--bind", str(saves / "public"), str(prefix / "drive_c/users/Public")]
-    if needs_programdata(game):
-        args += ["--bind", str(saves / "programdata"), str(prefix / "drive_c/ProgramData")]
+    dirs = [profile, upper, work, prefix_root(key, platform), lower, game_dir_path]
+
+    if platform == WINDOWS:
+        proton = find_proton()
+        prefix = pfx_root(key)
+        if needs_profile(game):
+            args += ["--bind", str(profile), str(prefix / "drive_c/users/steamuser")]
+        if needs_public(game):
+            args += ["--bind", str(saves / "public"), str(prefix / "drive_c/users/Public")]
+            dirs.append(saves / "public")
+        if needs_programdata(game):
+            args += ["--bind", str(saves / "programdata"), str(prefix / "drive_c/ProgramData")]
+            dirs.append(saves / "programdata")
+        command = [*proton_command(proton), "run", f"{game_dir_path}/{program}", *game.args]
+        env = {
+            "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(proton.root),
+            "STEAM_COMPAT_DATA_PATH": str(prefix_root(key, platform)),
+            "STEAM_COMPAT_INSTALL_PATH": str(game_dir_path),
+        }
+    else:
+        home = Path.home()
+        args += ["--bind", str(profile), str(home)]
+        command = [*native_runner(), f"{game_dir_path}/{program}", *game.args]
+        # These point inside the bound profile, so a game that honours XDG writes there too.
+        env = {
+            "HOME": str(home),
+            "XDG_DATA_HOME": str(home / ".local/share"),
+            "XDG_CONFIG_HOME": str(home / ".config"),
+            "XDG_CACHE_HOME": str(home / ".cache"),
+            "XDG_STATE_HOME": str(home / ".local/state"),
+        }
+
     args += ["--chdir", f"{game_dir_path}/{workdir}" if workdir else str(game_dir_path),
-             "--", *proton_command(proton), "run", f"{game_dir_path}/{program}", *game.args]
-
-    dirs = [profile, upper, work, prefix_root(key), lower, game_dir_path]
-    if needs_public(game):
-        dirs.append(saves / "public")
-    if needs_programdata(game):
-        dirs.append(saves / "programdata")
-
-    env = {
-        "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(proton.root),
-        "STEAM_COMPAT_DATA_PATH": str(prefix_root(key)),
-        "STEAM_COMPAT_INSTALL_PATH": str(game_dir_path),
-    }
+             "--", *command]
     return RunPlan(tool("bwrap"), tuple(args), env, path.parent, {}, dirs=tuple(dirs),
                    mounts=(mount,))
 
@@ -501,6 +614,7 @@ class PackPlan:
     folder: Path
     output: Path
     game: ProtonGame
+    platform: str = PLATFORM
 
     @property
     def size(self) -> int:
@@ -508,12 +622,12 @@ class PackPlan:
 
     def describe(self) -> str:
         title = dict(self.game.metadata).get("name")
-        line = (f"pack {self.folder} -> {self.output} ({self.size / 2**20:.1f} MB before compression), "
-                f"program {self.game.program}")
+        line = (f"pack {self.folder} -> {self.output} on {self.platform} "
+                f"({self.size / 2**20:.1f} MB before compression), program {self.game.program}")
         return f"{line}\n  metadata: {title}" if title else line
 
 
-def _validate_folder(folder: Path) -> ProtonGame:
+def _validate_folder(folder: Path, platform: str = PLATFORM) -> ProtonGame:
     if not folder.is_dir():
         raise ManifestError(f"{folder}: not a folder")
     manifest = folder / MANIFEST
@@ -537,17 +651,22 @@ def _validate_folder(folder: Path) -> ProtonGame:
                      if p.is_file() and fnmatch.fnmatch(p.relative_to(folder).as_posix(), pattern))
     if len(matches) != 1:
         raise ManifestError(f"{manifest}: expected one program matching {program}, found {len(matches)}")
+    if platform == LINUX and not os.access(matches[0], os.X_OK):
+        raise ManifestError(f"{manifest}: {program} is not executable")
     workdir = str(declared.get("workdir") or "").strip("/\\")
     if workdir and not (folder / workdir).is_dir():
         raise ManifestError(f"{manifest}: workdir {workdir} isn't in the folder")
     args = tuple(str(a) for a in (declared.get("args") or ()))
-    return ProtonGame(folder, pattern, args or _launch_args(entry), _save_entries(entry), workdir, folder.name,
-                      _metadata(entry))
+    return ProtonGame(folder, pattern, args or _launch_args(entry, platform),
+                      _save_entries(entry, platform), workdir, folder.name, _metadata(entry),
+                      platform)
 
 
-def pack_plan(folder: Path, output: Path) -> PackPlan:
+def pack_plan(folder: Path, output: Path, platform: str = PLATFORM) -> PackPlan:
+    if platform not in (WINDOWS, LINUX):
+        raise ManifestError(f"{platform}: pack for {WINDOWS} or {LINUX}")
     folder = folder.expanduser().resolve()
-    game = _validate_folder(folder)
+    game = _validate_folder(folder, platform)
     output = output.expanduser()
     if output.suffix.lower() != SUFFIX:
         raise ManifestError(f"{output}: the archive has to end in {SUFFIX}")
@@ -555,7 +674,7 @@ def pack_plan(folder: Path, output: Path) -> PackPlan:
         raise ManifestError(f"{output}: write the archive outside the folder being packed")
     if output.exists():
         raise FileExistsError(f"{output} already exists")
-    return PackPlan(folder, output, game)
+    return PackPlan(folder, output, game, platform)
 
 
 def pack(plan: PackPlan) -> Path:
@@ -563,17 +682,18 @@ def pack(plan: PackPlan) -> Path:
     command = [str(tool("mksquashfs")), str(plan.folder), str(plan.output),
                "-noappend", "-comp", "zstd", "-Xcompression-level", "22", "-b", "1M",
                "-all-root", "-no-progress", "-quiet", "-mkfs-time", "0", "-all-time", "0"]
-    subprocess.run(command, check=True)
+    subprocess.run(command, check=True, env=tool_env())
     return plan.output
 
 
-def upload(plan: PackPlan, client, platform: str = PLATFORM, progress=None) -> Rom | None:
+def upload(plan: PackPlan, client, platform: str | None = None, progress=None) -> Rom | None:
     """Upload the archive and, once RomM has scanned it, apply the manifest's metadata.
 
     A scan can't name a squashfs on its own, so the entry would otherwise keep the
     file name. Returns the ROM the metadata went to, or None when the manifest
     declares none.
     """
+    platform = platform or plan.platform
     platform_id = client.ensure_platform(platform)
     client.upload_rom(platform_id, plan.output, plan.output.name, progress)
     task = client.scan_platform(platform)
