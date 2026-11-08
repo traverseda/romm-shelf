@@ -601,6 +601,15 @@ def test_eden_patch_waits_for_the_first_run(home, settings):
     assert p.state == "applied" and not (home / "emulators/eden/qt-config.ini").exists()
 
 
+def test_bundled_emulators_keep_steams_library_path_out(tmp_path, monkeypatch):
+    """Steam's LD_LIBRARY_PATH carries another glibc and its old Ubuntu runtime: a Nix program that
+    loads those dies in the loader, so a Steam launch gets the bundle's libGL and nothing else."""
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/nix/store/other-glibc/lib:/steam/steam-runtime")
+    lib = tmp_path / "retroarch/lib"
+    lib.mkdir(parents=True)
+    assert emulators.steam_overlay_libs(tmp_path / "retroarch") == {"LD_LIBRARY_PATH": str(lib)}
+
+
 def test_pcsx2_runs_ps2_in_its_own_data_folder(home, layout, bundle, tmp_path):
     rom = ps2_game(layout)
     plan = PCSX2.run_plan(rom, layout, bundle, tmp_path / "run")
@@ -696,6 +705,9 @@ def test_bundled_cores_are_plugins():
     assert emulator_for(LocalRom("n3ds", Path("x.3ds"))).name == "azahar"
     assert emulator_for(LocalRom("wiiu", Path("x.wud"))).name == "cemu"
     assert emulator_for(LocalRom("switch", Path("x.nsp"))).name == "eden"
+    # Native Linux/Proton games run themselves, so they have no emulator (and no settings dialog).
+    assert emulator_for(LocalRom("linux", Path("x.squashfs"))) is None
+    assert emulator_for(LocalRom("win", Path("x.squashfs"))) is None
 
 
 def test_bundled_cores_cover_retrodecks_retroarch_systems():
@@ -751,6 +763,8 @@ def test_bundle_paths_only_go_on_the_command_line(home, layout, bundle, tmp_path
     appended = parse(plan.files[tmp_path / "run/retroarch-bundle.cfg"])
     assert appended["libretro_directory"] == str(bundle / "retroarch/cores")
     assert appended["joypad_autoconfig_dir"] == str(bundle / "retroarch/autoconfig")
+    # GameMode's helpers need root through pkexec; the launch must not ask for a password.
+    assert appended["gamemode_enable"] == "false"
     assert all(str(bundle) not in v for v in parse(DEFAULT_CFG).values())
 
 
@@ -768,6 +782,8 @@ def test_retroarch_patch_enforces_steam_input_and_save_folders(home, settings, l
     assert [cfg[f"input_player{n}_joypad_index"] for n in range(1, 5)] == ["0", "1", "2", "3"]
     assert cfg["input_remap_binds_enable"] == "false" and cfg["auto_remaps_enable"] == "false"
     assert cfg["input_autodetect_enable"] == "true"
+    # GameMode would ask for a password through pkexec; Steam already runs the session.
+    assert cfg["gamemode_enable"] == "false"
     # Straight to the game: no launch animation or boot-time on-screen messages.
     assert cfg["menu_show_load_content_animation"] == "false"
     assert cfg["rgui_show_start_screen"] == "false"

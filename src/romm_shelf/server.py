@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from romm_shelf import bios, media, mods, patches, player, sleep, steam
+from romm_shelf import bios, emulators, media, mods, patches, player, sleep, steam
 from romm_shelf.adapters import DiscReader, load_adapters
 from romm_shelf.auth import Session, load_session
 from romm_shelf.config import Settings, host_env, play_log, program
@@ -377,13 +377,17 @@ def create_app(settings: Settings | None = None, *, ui: bool = False, watch_slee
         return {"synced": "queued"}
 
     def entry(rom: Rom, lib: Library) -> dict:
+        local = lib.local.get(rom.id)
+        # A game with no emulator (a native Linux/Proton game) has no per-game settings dialog.
+        emulator = emulators.emulator_for(local) if local is not None else None
         return {
             "id": rom.id,
             "name": rom.name or rom.fs_name_no_ext,
             "platform": rom.platform_fs_slug,
             "fs_name": rom.fs_name,
             "size": rom.fs_size_bytes,
-            "status": "on-device" if rom.id in lib.local else "remote",
+            "status": "on-device" if local is not None else "remote",
+            "emulator": emulator.name if emulator is not None else None,
             "cover": f"/api/cover/{rom.id}" if rom.path_cover_small else None,
         }
 

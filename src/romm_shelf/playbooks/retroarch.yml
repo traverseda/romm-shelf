@@ -27,6 +27,9 @@
       input_remap_binds_enable: "false"
       auto_remaps_enable: "false"
       input_menu_toggle_gamepad_combo: "2"  # L3 + R3
+      # GameMode's governor and split-lock helpers go through pkexec, which asks for a password
+      # when the user isn't in the gamemode group. Steam runs the session already.
+      gamemode_enable: "false"
       # Straight into the game: no launch animation, no boot-time on-screen messages.
       menu_show_load_content_animation: "false"
       rgui_show_start_screen: "false"

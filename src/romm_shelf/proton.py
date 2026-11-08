@@ -489,14 +489,25 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
-def proton_command(proton: Proton, env: dict | None = None) -> list[str]:
-    """The Proton script, plus an optional runner such as `steam-run` on NixOS.
+def proton_runner(env: dict | None = None) -> list[str]:
+    """The command prefix Proton needs outside Steam, or [] when it runs directly.
 
-    Set ROMM_SHELF_PROTON_RUNNER when a game launched outside Steam needs an FHS wrapper.
-    """
+    ROMM_SHELF_PROTON_RUNNER wins. A Steam runtime already in the environment needs none.
+    Otherwise `steam-run` (NixOS) gives Proton the FHS environment it expects; without it Wine
+    starts but never opens a window (todo.md)."""
     environ = os.environ if env is None else env
-    runner = shlex.split(environ.get("ROMM_SHELF_PROTON_RUNNER") or "")
-    return [*runner, str(proton.script)]
+    if override := environ.get("ROMM_SHELF_PROTON_RUNNER"):
+        return shlex.split(override)
+    if environ.get("STEAM_RUNTIME") or environ.get("PRESSURE_VESSEL_RUNTIME"):
+        return []
+    if shutil.which("steam-run", path=environ.get("PATH", "")):
+        return ["steam-run"]
+    return []
+
+
+def proton_command(proton: Proton, env: dict | None = None) -> list[str]:
+    """The Proton script, plus a runtime wrapper such as `steam-run` on NixOS."""
+    return [*proton_runner(env), str(proton.script)]
 
 
 # Linux runtime. A prebuilt native game needs an FHS-like environment on NixOS, and

@@ -367,7 +367,7 @@
       <q-card-actions align="right" class="q-gutter-sm">
         <q-btn v-if="detail.extras?.length" color="grey-8" unelevated :label="extrasLabel(detail.extras)" data-nav
                ref="extrasButton" @click="openExtras()"></q-btn>
-        <q-btn v-if="detail.status === 'on-device'" color="primary" unelevated label="Settings" data-nav
+        <q-btn v-if="detail.status === 'on-device' && detail.emulator !== null" color="primary" unelevated label="Settings" data-nav
                ref="settingsButton" @click="openGameSettings"></q-btn>
         <q-btn v-if="detail.status === 'on-device'" color="positive" unelevated label="Play" data-nav data-nav-default
                :loading="!!playJob" @click="playNow"></q-btn>
@@ -830,10 +830,10 @@ const app = createApp({
       gamePatchesLoading.value = true; gamePatchesMessage.value = null;
       try {
         const res = await fetch(`/api/rom/${detail.value.id}/patches`);
-        if (!res.ok) throw new Error(`settings: HTTP ${res.status}`);
-        const body = await res.json();  // instantly: every patch is "checking"
+        const body = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(`settings: ${apiError(body || {}, res)}`);
         if (generation !== gameGeneration) return;
-        gamePatches.value = body;
+        gamePatches.value = body;  // instantly: every patch is "checking"
       } catch (e) {
         gamePatchesMessage.value = String(e);
         gamePatchesLoading.value = false;
@@ -845,8 +845,9 @@ const app = createApp({
         document.querySelector('[data-nav-group="game-settings"] [data-nav]')?.focus();
       try {
         const res = await fetch(`/api/rom/${detail.value.id}/patches?check=true`);
-        if (!res.ok) throw new Error(`settings: HTTP ${res.status}`);
-        if (generation === gameGeneration) gamePatches.value = await res.json();
+        const body = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(`settings: ${apiError(body || {}, res)}`);
+        if (generation === gameGeneration) gamePatches.value = body;
       } catch (e) {
         if (generation !== gameGeneration) return;
         gamePatchesMessage.value = String(e);
@@ -854,7 +855,7 @@ const app = createApp({
       }
     }
     function openGameSettings() {
-      if (!detail.value || detail.value.status !== "on-device") return;
+      if (!detail.value || detail.value.status !== "on-device" || detail.value.emulator === null) return;
       gamePatches.value = []; gamePatchesMessage.value = null;
       gameSettingsOpen.value = true;
       loadGamePatches();

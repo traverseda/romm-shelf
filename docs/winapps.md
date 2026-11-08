@@ -17,8 +17,8 @@ instead of Proton, with a per-game profile bound over `$HOME`. See
 - `romm-shelf` and its tool bundle (`bwrap`, `squashfuse`, `unsquashfs`,
   `mksquashfs`, `fusermount3`), or those tools on `PATH`
 - an installed Steam Proton
-- on NixOS, `steam-run` on `PATH`; set `ROMM_SHELF_PROTON_RUNNER=steam-run` if
-  Proton cannot find a normal FHS environment
+- on NixOS, `steam-run` on `PATH`; romm-shelf uses it automatically when Steam
+  hasn't already supplied a runtime, and `ROMM_SHELF_PROTON_RUNNER` overrides it
 
 ## 1. Lay out the folder
 
@@ -152,8 +152,9 @@ On first launch Proton creates a disposable prefix under
   romm-shelf mounts it with ownership remapped to the running user so overlay
   copies are writable. If you see `permission denied` on a save or config write,
   check that the mount uses `squashfuse -o uid=<uid>,gid=<gid>`.
-- **Proton does not start on NixOS.** Set
-  `ROMM_SHELF_PROTON_RUNNER=steam-run`, and make sure 32-bit FreeType is visible
+- **Proton does not start on NixOS.** romm-shelf adds `steam-run` when the
+  wrapper is on `PATH`; `ROMM_SHELF_PROTON_RUNNER=steam-run` forces it if the
+  environment hides it, and make sure 32-bit FreeType is visible
   if Wine complains about fonts.
 - **A save is not found.** Check the manifest path and placeholder, then run
   `romm-shelf native pack ... --plan` and `romm-shelf play <id> --plan`. There is

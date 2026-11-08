@@ -196,6 +196,10 @@ def test_a_runner_can_wrap_proton_for_nixos(monkeypatch, tmp_path):
     assert proton.proton_command(p, {"ROMM_SHELF_PROTON_RUNNER": "steam-run"}) == \
         ["steam-run", str(script)]
     assert proton.proton_command(p, {}) == [str(script)]
+    monkeypatch.setattr(proton.shutil, "which",
+                        lambda name, path=None: "/usr/bin/steam-run" if name == "steam-run" else None)
+    assert proton.proton_command(p, {"PATH": "/usr/bin"}) == ["steam-run", str(script)]
+    assert proton.proton_command(p, {"PATH": "/usr/bin", "STEAM_RUNTIME": "1"}) == [str(script)]
 
 
 def test_pack_validates_and_builds_a_deterministic_squashfs(monkeypatch, tmp_path):

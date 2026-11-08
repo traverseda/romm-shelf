@@ -69,14 +69,18 @@ def bundle_entry(path: Path) -> bool:
 
 
 def steam_overlay_libs(emulator: Path) -> dict[str, str]:
-    """LD_LIBRARY_PATH with the bundle's libGL first (`emulator`/lib). Steam preloads its overlay into
-    every process of a game it launches, and the overlay needs libGL.so.1; the bundle's programs use
-    Nix's loader, which never looks in /usr/lib, so without this each one fails to start."""
+    """LD_LIBRARY_PATH for a bundled emulator that Steam started: the bundle's libGL (`emulator`/lib).
+
+    Steam preloads its overlay into every process of a game it launches, and the overlay needs
+    libGL.so.1; the bundle's programs use Nix's loader, which never looks in /usr/lib, so without
+    this each one fails to start. Steam's own LD_LIBRARY_PATH must not be inherited: on NixOS it
+    carries another glibc and its old Ubuntu runtime libraries, which the loader puts ahead of the
+    bundle's own, aborting the program in early init (stack smashing) or failing on symbol versions.
+    The overlay still loads: its RUNPATH is `$ORIGIN`, so it finds its own steamclient.so."""
     libs = emulator / "lib"
     if not bundle_entry(libs):
         return {}
-    rest = os.environ.get("LD_LIBRARY_PATH")
-    return {"LD_LIBRARY_PATH": f"{libs}:{rest}" if rest else str(libs)}
+    return {"LD_LIBRARY_PATH": str(libs)}
 
 
 def runtime_dir() -> Path:
@@ -134,6 +138,10 @@ def bundle_config(retroarch: Path, runtime: Path) -> dict[str, str]:
         "assets_directory": str(retroarch / "assets"),
         "video_shader_dir": str(retroarch / "shaders"),
         "cache_directory": str(runtime / "cache"),
+        # GameMode's CPU governor and split-lock helpers run through pkexec, which asks for the
+        # user's password when they aren't in the gamemode group (every launch on NixOS). Steam
+        # already owns the session; the prompt is not worth the governor tweak.
+        "gamemode_enable": "false",
     }
 
 
