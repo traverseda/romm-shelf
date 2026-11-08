@@ -31,14 +31,25 @@ def _from_appimage() -> bool:
     return here.is_relative_to(Path(appdir).resolve()) or (Path(appdir) / here.relative_to("/")).is_file()
 
 
+def appimage_path() -> Path | None:
+    """The AppImage file being run, or None from a checkout, Nix or PyPI install.
+
+    An APPIMAGE inherited from some other AppImage doesn't count.
+    """
+    if _from_appimage():
+        return Path(os.environ["APPIMAGE"])
+    return None
+
+
 def program() -> str:
     """How to run this same romm-shelf again, from a unit, a desktop entry or a child process.
 
     From an AppImage that's the AppImage file: the mounted path inside it goes away when it exits.
-    Otherwise the running script. An APPIMAGE inherited from some other AppImage doesn't count.
+    Otherwise the running script.
     """
-    if _from_appimage():
-        return os.environ["APPIMAGE"]
+    path = appimage_path()
+    if path is not None:
+        return str(path)
     return str(Path(sys.argv[0]).resolve())
 
 

@@ -411,7 +411,7 @@ def extract_layer(data: bytes, root: Path | str | None, digest: str) -> tuple[st
 
 # Install, update and prune
 
-def _version_tuple(value: str) -> tuple[int, ...]:
+def version_tuple(value: str) -> tuple[int, ...]:
     bits = []
     for part in value.replace("-", ".").split("."):
         if not part.isdigit():
@@ -446,7 +446,7 @@ def plan_install(ref: PackRef, root: Path | str | None = None,
     min_core = labels.get(MIN_CORE_LABEL, "")
     if min_core:
         from romm_shelf import __version__
-        if _version_tuple(__version__) < _version_tuple(min_core):
+        if version_tuple(__version__) < version_tuple(min_core):
             raise PackError(f"pack {ref.name} needs romm-shelf {min_core} or newer "
                             f"(this is {__version__})")
     needed = tuple((layer["digest"], int(layer.get("size") or 0))
@@ -468,7 +468,7 @@ def install(ref: PackRef, root: Path | str | None = None, registry: Registry | N
     min_core = labels.get(MIN_CORE_LABEL, "")
     if min_core:
         from romm_shelf import __version__
-        if _version_tuple(__version__) < _version_tuple(min_core):
+        if version_tuple(__version__) < version_tuple(min_core):
             raise PackError(f"pack {ref.name} needs romm-shelf {min_core} or newer "
                             f"(this is {__version__})")
 

@@ -12,6 +12,7 @@ from typing import Annotated
 import typer
 from loguru import logger
 
+from romm_shelf import __version__
 from romm_shelf.adapters import DiscReader, load_adapters
 from romm_shelf.auth import device_login, load_session, save_credentials
 from romm_shelf.config import Settings, play_log, program
@@ -19,6 +20,7 @@ from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom, match, name_matches, recall, remember, scan_local
 from romm_shelf.romm import Rom
 from romm_shelf import bios, media, mods, native, packs, patches, player, proton, steam
+from romm_shelf import update as updater
 from romm_shelf.service import rom_for_path, sync_roms
 from romm_shelf.sync import inventory, negotiate_payload
 
@@ -62,6 +64,41 @@ def status():
     typer.echo(f"saves:    {layout.saves}")
     typer.echo(f"states:   {layout.states}")
     typer.echo("adapters: " + ", ".join(a.name for a in load_adapters()))
+
+
+@app.command()
+def update(
+    check: Annotated[bool, typer.Option("--check", help="Print installed and available versions")] = False,
+    plan: Annotated[bool, typer.Option("--plan", help="Print the download; change nothing")] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="Download, verify and replace the AppImage")] = False,
+    rollback: Annotated[bool, typer.Option("--rollback", help="Swap back to the previous AppImage")] = False,
+):
+    """Update this AppImage from GitHub Releases (stable channel)."""
+    try:
+        dest = updater.installed_path()
+        if rollback:
+            updater.rollback(dest)
+            typer.echo(f"rolled back: {dest}")
+            return
+        release = updater.remote()
+        typer.echo(f"installed: {__version__}")
+        typer.echo(f"available: {release.version}")
+        if updater.is_current(release):
+            typer.echo("up to date")
+            return
+        if check:
+            return
+        typer.echo(f"url:       {release.url}")
+        typer.echo(f"sha256:    {release.sha256}")
+        typer.echo(f"destination: {dest}")
+        typer.echo(f"previous:  {dest}.previous (kept for --rollback)")
+        if plan or not yes:
+            typer.echo("no changes; re-run with --yes")
+            return
+        updater.download(release, dest)
+        typer.echo(f"updated to {release.version}")
+    except updater.UpdateError as e:
+        raise typer.Exit(str(e))
 
 
 @app.command("ls")
