@@ -1,10 +1,14 @@
-"""Save adapter for Dolphin (GameCube and Wii) as RetroDECK configures it.
+"""Dolphin (GameCube and Wii): the bundled emulator and its save adapter.
 
 Dolphin keys saves by the game ID in the disc header, not by file name
-(design.md § Finding saves from the save side):
+(design.md § Finding saves from the save side). The `dolphin` patch points
+Dolphin's GCI folder and Wii NAND into the layout's saves/:
 
-    GameCube  saves/gc/dolphin/<US|EU|JP>/Card A/<maker>-<id4>-<name>.gci   one file each
-    Wii       saves/wii/dolphin/title/<type>/<hex id4>/data/                  a folder
+    GameCube  saves/gc/dolphin/<USA|JPN|EUR>/<maker>-<id4>-<name>.gci   one file each
+    Wii       saves/wii/dolphin/title/<type>/<hex id4>/data/              a folder
+
+With a GCI folder set, Dolphin adds the region folder itself (USA, JPN, EUR)
+and no "Card A". RetroDECK's old shape, <US|EU|JP>/Card A/, is still found.
 
 Mods (Dolphin game mod descriptors, design.md § Mods) keep their own saves:
 Pulsar-based mods in the Wii NAND under shared2/Pulsar/<patch id>/, and
@@ -12,19 +16,25 @@ Riivolution <savegame> redirects inside their patch folder.
 """
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from romm_shelf import mods
 from romm_shelf.adapters import DiscReader, LocalSave
+from romm_shelf.emulators import content, emulator_home, local_program, steam_overlay_libs
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom
+from romm_shelf.native import RunPlan
 from romm_shelf.romm import Rom
 
 EMULATOR = "dolphin"
 GCI = re.compile(r"^([0-9A-Z]{2})-([0-9A-Z]{4})-.*\.gci$")
 GAME_ID = re.compile(rb"^[0-9A-Z]{6}$")
 WII_TYPES = ("00010000", "00010004")  # disc games; 00010004 is games with channel-like saves (Mario Kart Wii)
-REGION_DIRS = {"E": "US", "J": "JP"}  # every other region letter is a PAL disc
+# Dolphin's own names for a set GCI folder (Config::GetGCIFolderPath). Korean discs count as
+# Japanese there; every other region letter is a PAL disc.
+REGION_DIRS = {"E": "USA", "J": "JPN", "K": "JPN"}
+GCI_DIRS = ("USA", "JPN", "EUR")
 DISC_SUFFIXES = (".iso", ".gcm", ".rvz", ".wia", ".wbfs", ".ciso")
 PATCH_ID = re.compile(r'<patch\s+id="([^"]+)"')
 
@@ -46,7 +56,9 @@ def disc_id(head: bytes | None) -> str | None:
 
 
 def _gc_dirs(layout: RetroDeckLayout) -> list[Path]:
-    return sorted((layout.saves / "gc/dolphin").glob("*/Card A"))
+    """Dolphin's region folders, and RetroDECK's old <region>/Card A/ ones."""
+    root = layout.saves / "gc/dolphin"
+    return sorted([*(p for d in GCI_DIRS if (p := root / d).is_dir()), *root.glob("*/Card A")])
 
 
 def _wii_title(layout: RetroDeckLayout) -> Path:
@@ -100,8 +112,8 @@ class DolphinAdapter:
         if gid is None:
             return None
         if slot.startswith("gci:"):
-            region = REGION_DIRS.get(gid[3], "EU")
-            return layout.saves / "gc/dolphin" / region / "Card A" / Path(slot[4:]).name
+            region = REGION_DIRS.get(gid[3], "EUR")
+            return layout.saves / "gc/dolphin" / region / Path(slot[4:]).name
         if slot.startswith("nand:") and slot[5:] in WII_TYPES:
             return _wii_title(layout) / slot[5:] / gid[:4].encode("ascii").hex() / "data"
         return None
@@ -139,3 +151,61 @@ class DolphinAdapter:
             path = layout.mods / slot[12:]
             return path if path.is_relative_to(layout.mods) and ".." not in Path(slot[12:]).parts else None
         return None
+
+
+# The bundled emulator (design.md § Bundled emulators), in the romm_shelf.emulators entry-point
+# group. packaging/emulators.nix bundles it as dolphin/: bin/dolphin-emu, lib/ and default.ini.
+
+# Which file in a folder ROM to start, best first: a playlist, a mod descriptor, then disc images.
+LAUNCHABLE = (".m3u", ".json", ".rvz", ".wia", ".gcz", ".ciso", ".wbfs", ".iso", ".gcm", ".tgc",
+              ".wad", ".dol", ".elf")
+STEAM_PADS = {"SteamVirtualGamepadInfo": ""}
+"""Steam passes this file so SDL names each virtual pad after the controller behind it. Dolphin
+numbers devices per name (SDL/<n>/<name>), so with mixed controllers Steam's order would be lost.
+Without it every virtual pad is "Steam Virtual Gamepad", numbered in SDL's order, as RetroArch sees
+them (design.md § Controller rule)."""
+
+
+def user_dir() -> Path:
+    """The bundled Dolphin's user folder (its --user): Config/, caches and save states."""
+    return emulator_home() / "dolphin"
+
+
+@dataclass(frozen=True)
+class DolphinEmulator:
+    """Standalone Dolphin, for GameCube and Wii discs, WADs and mod descriptors."""
+
+    name: str = "dolphin"
+    systems: tuple[str, ...] = ("gc", "wii")
+    patches: tuple[str, ...] = ("dolphin",)
+    """Run on top of the default when Dolphin is first set up (design.md § Patches)."""
+
+    def game_vars(self, launched: Path) -> dict[str, str]:
+        """What a game-scoped patch gets about a game: Dolphin's game ID (`id`), which names its
+        per-game settings. A mod descriptor's is its base disc's."""
+        disc = d.base if (d := mods.load(launched)) is not None and "base-file" in d.data else launched
+        with disc.open("rb") as f:
+            gid = disc_id(f.read(0x10000))
+        return {"id": gid} if gid else {}
+
+    def run_plan(self, rom: LocalRom, layout: RetroDeckLayout, bundle: Path, runtime: Path) -> RunPlan:
+        from romm_shelf.patches import SETTINGS_PATCH, values
+        chosen = values(SETTINGS_PATCH)
+        if chosen.get("dolphin") == "external":
+            program, extra = local_program(chosen, "dolphin_command", "dolphin-emu")
+            return RunPlan(program, (*extra, "--batch", f"--exec={content(rom, LAUNCHABLE)}"), dict(STEAM_PADS),
+                           rom.path.parent, seed={})
+        dolphin = bundle / "dolphin"
+        program = dolphin / "bin/dolphin-emu"
+        if not program.exists():
+            raise FileNotFoundError(f"{self.name}: {program} isn't in the bundle")
+        user = user_dir()
+        config = user / "Config/Dolphin.ini"
+        # --batch: no game list, and Dolphin exits when the game stops.
+        args = (f"--user={user}", "--batch", f"--exec={content(rom, LAUNCHABLE)}")
+        seed = {} if config.exists() else {config: (dolphin / "default.ini").read_bytes()}
+        return RunPlan(program, args, {**STEAM_PADS, **steam_overlay_libs(dolphin)}, rom.path.parent,
+                       seed=seed, patches=self.patches if seed else ())
+
+
+DOLPHIN = DolphinEmulator()

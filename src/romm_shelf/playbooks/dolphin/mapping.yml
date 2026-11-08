@@ -1,0 +1,136 @@
+# Dolphin's controller mapping, shared by the `dolphin` patch (every game) and `dolphin-game` (one
+# game). Not a patch itself: patches are the *.yml files directly in playbooks/.
+#
+# Built from the patch's choices: buttons, wii_extension, wii_sideways. Vars are templated lazily,
+# so each playbook only has to define those (and `pad`).
+#
+# Steam Input pads only (design.md § Controller rule): SDL gamepad input names from Dolphin's
+# SDLGamepad.cpp. Vertical axes are XInput's way round: "Left Y+" is up.
+
+# Every Steam Input pad, once romm-shelf launches Dolphin without SteamVirtualGamepadInfo. Dolphin
+# numbers SDL devices per name, so SDL/<n> is the n+1th pad in SDL's order.
+pad: Steam Virtual Gamepad
+
+# Which face button is which: by label (an Xbox pad and the Deck: A at the bottom) or by Nintendo's
+# placement (A on the right, B at the bottom, as on a GameCube, Classic or Switch Pro controller).
+layouts:
+  xbox: {A: Button S, B: Button E, X: Button W, Y: Button N}
+  nintendo: {A: Button E, B: Button S, X: Button N, Y: Button W}
+btn: "{{ layouts[buttons] }}"
+
+# GameCube controller: also what Steering wheel, DK Bongos and the Dance Mat read their input from.
+gcpad:
+  Buttons/A: "`{{ btn.A }}`"
+  Buttons/B: "`{{ btn.B }}`"
+  Buttons/X: "`{{ btn.X }}`"
+  Buttons/Y: "`{{ btn.Y }}`"
+  Buttons/Z: "`Shoulder R`"
+  Buttons/Start: "`Start`"
+  Main Stick/Up: "`Left Y+`"
+  Main Stick/Down: "`Left Y-`"
+  Main Stick/Left: "`Left X-`"
+  Main Stick/Right: "`Left X+`"
+  Main Stick/Calibration: "100.00"
+  C-Stick/Up: "`Right Y+`"
+  C-Stick/Down: "`Right Y-`"
+  C-Stick/Left: "`Right X-`"
+  C-Stick/Right: "`Right X+`"
+  C-Stick/Calibration: "100.00"
+  Triggers/L: "`Trigger L`"
+  Triggers/R: "`Trigger R`"
+  Triggers/L-Analog: "`Trigger L`"
+  Triggers/R-Analog: "`Trigger R`"
+  D-Pad/Up: "`Pad N`"
+  D-Pad/Down: "`Pad S`"
+  D-Pad/Left: "`Pad W`"
+  D-Pad/Right: "`Pad E`"
+  Rumble/Motor: "`Motor L` | `Motor R`"
+
+# Wii Remote: the right stick points, R3 is Home.
+wiimote_common:
+  Source: "1"
+  Buttons/-: "`Back`"
+  Buttons/+: "`Start`"
+  Buttons/Home: "`Thumb R`"
+  D-Pad/Up: "`Pad N`"
+  D-Pad/Down: "`Pad S`"
+  D-Pad/Left: "`Pad W`"
+  D-Pad/Right: "`Pad E`"
+  IR/Up: "`Right Y+`"
+  IR/Down: "`Right Y-`"
+  IR/Left: "`Right X-`"
+  IR/Right: "`Right X+`"
+  Rumble/Motor: "`Motor L` | `Motor R`"
+# Held upright: A on the A button, B on the right trigger as on the remote, shake on B.
+wiimote_upright:
+  Options/Sideways Wiimote: "False"
+  Buttons/A: "`{{ btn.A }}`"
+  Buttons/B: "`Trigger R`"
+  Buttons/1: "`{{ btn.X }}`"
+  Buttons/2: "`{{ btn.Y }}`"
+  Shake/X: "`{{ btn.B }}`"
+  Shake/Y: "`{{ btn.B }}`"
+  Shake/Z: "`{{ btn.B }}`"
+# Held sideways (NES-style games): 2 and 1 where a pad's A and B are. Dolphin turns the D-pad.
+wiimote_sideways:
+  Options/Sideways Wiimote: "True"
+  Buttons/2: "`{{ btn.A }}`"
+  Buttons/1: "`{{ btn.B }}`"
+  Buttons/A: "`{{ btn.X }}`"
+  Buttons/B: "`{{ btn.Y }}`"
+  Shake/X: "`Shoulder R`"
+  Shake/Y: "`Shoulder R`"
+  Shake/Z: "`Shoulder R`"
+nunchuk:
+  Nunchuk/Buttons/C: "`Shoulder L`"
+  Nunchuk/Buttons/Z: "`Trigger L`"
+  Nunchuk/Stick/Up: "`Left Y+`"
+  Nunchuk/Stick/Down: "`Left Y-`"
+  Nunchuk/Stick/Left: "`Left X-`"
+  Nunchuk/Stick/Right: "`Left X+`"
+  Nunchuk/Stick/Calibration: "100.00"
+# Classic Controller (and Pro, which Dolphin emulates as the same thing): ZL/ZR on the triggers.
+classic:
+  Classic/Buttons/A: "`{{ btn.A }}`"
+  Classic/Buttons/B: "`{{ btn.B }}`"
+  Classic/Buttons/X: "`{{ btn.X }}`"
+  Classic/Buttons/Y: "`{{ btn.Y }}`"
+  Classic/Buttons/ZL: "`Trigger L`"
+  Classic/Buttons/ZR: "`Trigger R`"
+  Classic/Buttons/-: "`Back`"
+  Classic/Buttons/+: "`Start`"
+  Classic/Buttons/Home: "`Thumb R`"
+  Classic/Triggers/L: "`Shoulder L`"
+  Classic/Triggers/R: "`Shoulder R`"
+  Classic/Triggers/L-Analog: "`Shoulder L`"
+  Classic/Triggers/R-Analog: "`Shoulder R`"
+  Classic/D-Pad/Up: "`Pad N`"
+  Classic/D-Pad/Down: "`Pad S`"
+  Classic/D-Pad/Left: "`Pad W`"
+  Classic/D-Pad/Right: "`Pad E`"
+  Classic/Left Stick/Up: "`Left Y+`"
+  Classic/Left Stick/Down: "`Left Y-`"
+  Classic/Left Stick/Left: "`Left X-`"
+  Classic/Left Stick/Right: "`Left X+`"
+  Classic/Left Stick/Calibration: "100.00"
+  Classic/Right Stick/Up: "`Right Y+`"
+  Classic/Right Stick/Down: "`Right Y-`"
+  Classic/Right Stick/Left: "`Right X-`"
+  Classic/Right Stick/Right: "`Right X+`"
+  Classic/Right Stick/Calibration: "100.00"
+extensions: {nunchuk: Nunchuk, classic: Classic, none: None}
+wiimote: >-
+  {{ wiimote_common
+     | combine(wiimote_sideways if wii_sideways | bool else wiimote_upright)
+     | combine(nunchuk) | combine(classic)
+     | combine({'Extension': extensions[wii_extension]}) }}
+
+# GameCube ports (Dolphin's SIDevices) and graphics values.
+port_devices: {gc: "6", none: "0", steering: "8", dancemat: "9", bongos: "10"}
+aspect_ratios: {auto: "0", wide: "1", standard: "2", stretch: "3"}
+
+# Names of the per-game profiles (Config/Profiles/<type>/romm-shelf/), with -p<player> after them:
+# one per player, since a profile carries its own device. Every choice is in the name, so a file
+# never changes meaning and games can share them.
+gc_profile: "romm-shelf/{{ buttons }}"
+wii_profile: "romm-shelf/{{ buttons }}-{{ wii_extension }}-{{ 'sideways' if wii_sideways | bool else 'upright' }}"

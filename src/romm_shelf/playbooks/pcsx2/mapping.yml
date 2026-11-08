@@ -1,0 +1,35 @@
+# PCSX2's controller mapping. Steam Input is the only source of pads, and Steam's first pad is
+# player 1 (design.md § Controller rule): pad N is SDL-N-1, the order SDL sees Steam's virtual pads.
+# Face buttons are positional, so Steam Input's own Nintendo/Xbox layout switch changes nothing here.
+aspect_ratios:
+  auto: "Auto 4:3/3:2"
+  wide: "16:9"
+  standard: "4:3"
+  stretch: "Stretch"
+
+# PCSX2's names for the SDL gamepad controls (Input/SDLInputSource.cpp).
+bindings:
+  Up: DPadUp
+  Right: DPadRight
+  Down: DPadDown
+  Left: DPadLeft
+  Triangle: FaceNorth
+  Circle: FaceEast
+  Cross: FaceSouth
+  Square: FaceWest
+  Select: Back
+  Start: Start
+  L1: LeftShoulder
+  L2: "+LeftTrigger"
+  R1: RightShoulder
+  R2: "+RightTrigger"
+  L3: LeftStick
+  R3: RightStick
+  LUp: "-LeftY"
+  LRight: "+LeftX"
+  LDown: "+LeftY"
+  LLeft: "-LeftX"
+  RUp: "-RightY"
+  RRight: "+RightX"
+  RDown: "+RightY"
+  RLeft: "-RightX"

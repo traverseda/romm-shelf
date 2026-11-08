@@ -8,7 +8,7 @@ import pytest
 from romm_shelf import mods
 from romm_shelf.library import match, scan_local
 from romm_shelf.romm import Rom
-from tests.conftest import touch
+from tests.conftest import rom, touch
 
 BASE = "Mario Kart Wii (USA) (En,Fr,Es).rvz"
 RD = "/home/deck/Emulation/retrodeck"
@@ -102,7 +102,7 @@ def test_local_descriptor_matches_the_romm_folder(throwback, layout):
 def test_uninstall_keeps_saves_and_base_then_install_fills_back_in(throwback, layout, settings, tmp_path):
     payload = package_zip(mods.pack(mods.pack_plan(throwback, layout, tmp_path / "out", settings.fs_root)))
     folder = layout.mods / "Dolphin/Mario Kart Throwback v1.1"
-    removed, kept = mods.plan_uninstall(throwback, layout, settings.fs_root)
+    removed, kept = mods.plan_uninstall(throwback, mod_rom(), layout, settings.fs_root)
     assert kept == [folder / "riivolution/save/mktE", layout.roms / "wii" / BASE]
     mods.uninstall(removed)
     assert not throwback.exists() and not (folder / "Throwback").exists()
@@ -120,7 +120,7 @@ def test_uninstall_keeps_saves_and_base_then_install_fills_back_in(throwback, la
 
 def test_install_brings_the_base_disc(throwback, layout, settings, tmp_path):
     payload = package_zip(mods.pack(mods.pack_plan(throwback, layout, tmp_path / "out", settings.fs_root)))
-    mods.uninstall(mods.plan_uninstall(throwback, layout, settings.fs_root)[0] + [layout.roms / "wii" / BASE])
+    mods.uninstall(mods.plan_uninstall(throwback, mod_rom(), layout, settings.fs_root)[0] + [layout.roms / "wii" / BASE])
     client = FakeClient({1371: payload, 1368: b"disc"})
     plan = mods.plan_install(mod_rom(), client, layout, [mod_rom(), base_rom()])
     assert plan.base and plan.base.rom.id == 1368 and plan.size == 14
@@ -140,11 +140,11 @@ def test_install_refuses_over_an_installed_patch_folder(throwback, layout, setti
 def test_shared_patch_folder_is_kept(throwback, layout, settings):
     other = layout.roms / "wii/Throwback (no blur).json"
     other.write_text(throwback.read_text())
-    removed, kept = mods.plan_uninstall(throwback, layout, settings.fs_root)
+    removed, kept = mods.plan_uninstall(throwback, mod_rom(), layout, settings.fs_root)
     assert removed == [throwback]
     assert layout.mods / "Dolphin/Mario Kart Throwback v1.1" in kept
 
 
 def test_ordinary_roms_are_untouched(layout):
     path = layout.roms / "nes/Wizardry - The Knight of Diamonds.zip"
-    assert mods.plan_uninstall(path, layout) == ([path], [])
+    assert mods.plan_uninstall(path, rom(1006, "nes", path.name), layout) == ([path], [])

@@ -1,0 +1,76 @@
+# Azahar for every game: save data in the layout, Vulkan, fullscreen, and no first-run or close
+# prompt (design.md § Bundled emulators, Azahar). The controller profile is seeded on the first
+# run; this patch changes settings and storage paths, key by key.
+#
+# ansible.builtin only. Azahar's qt-config.ini is INI-like; keys are unique across its sections.
+- name: Azahar settings
+  hosts: all  # a scoped patch runs for its targets, one host each
+  gather_facts: false
+  vars:
+    x_scope: emulator
+    x_emulators: [azahar]
+    x_settings:
+      resolution:
+        title: Resolution scale
+        description: >-
+          Azahar's internal resolution. 1x is the 3DS's native 400x240; 2x is sharper and heavier.
+        choices:
+          "1": 1x
+          "2": 2x
+          "3": 3x
+          "4": 4x
+          "5": 5x
+        default: "2"
+    external: "{{ azahar == 'external' }}"
+    target: "{{ azahar_local_config | expanduser if external else azahar_config }}"
+    config: "{{ target }}/qt-config.ini"
+    nand: "{{ saves }}/n3ds/azahar/nand"
+    sdmc: "{{ saves }}/n3ds/azahar/sdmc"
+    settings:
+      - {section: "Data%20Storage", key: use_custom_storage, value: "true"}
+      - {section: "Data%20Storage", key: nand_directory, value: "{{ nand }}/"}
+      - {section: "Data%20Storage", key: sdmc_directory, value: "{{ sdmc }}/"}
+      - {section: "Data%20Storage", key: use_virtual_sd, value: "true"}
+      - {section: Renderer, key: graphics_api, value: "2"}
+      - {section: Renderer, key: resolution_factor, value: "{{ resolution }}"}
+      - {section: Renderer, key: use_vsync, value: "true"}
+      - {section: Miscellaneous, key: check_for_update_on_start, value: "false"}
+      - {section: Miscellaneous, key: enable_gamemode, value: "false"}
+      - {section: UI, key: firstStart, value: "false"}
+      - {section: UI, key: fullscreen, value: "true"}
+      - {section: UI, key: confirmClose, value: "false"}
+  tasks:
+    - name: Find Azahar's config
+      ansible.builtin.stat:
+        path: "{{ config }}"
+      register: config_file
+
+    - name: Make the NAND and SD card folders
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: ["{{ nand }}", "{{ sdmc }}"]
+      when: config_file.stat.exists
+
+    - name: Config sections
+      ansible.builtin.lineinfile:
+        path: "{{ config }}"
+        line: "[{{ item }}]"
+        create: true
+        mode: "0644"
+      loop: ["Data%20Storage", Renderer, Miscellaneous, UI]
+      when: config_file.stat.exists
+
+    - name: Config settings
+      ansible.builtin.lineinfile:
+        path: "{{ config }}"
+        regexp: '^{{ item.key | regex_escape }}='
+        line: "{{ item.key }}={{ item.value }}"
+        insertafter: '^\[{{ item.section }}\]$'
+        create: true
+        mode: "0644"
+      loop: "{{ settings }}"
+      loop_control:
+        label: "{{ item.section }} {{ item.key }}"
+      when: config_file.stat.exists

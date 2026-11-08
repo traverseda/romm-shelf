@@ -1,0 +1,162 @@
+# Dolphin for every game: controllers from Steam Input only, in Steam's order (player 1 is Steam's
+# first controller), saves where the dolphin save adapter looks, and the controller and picture
+# choices below. design.md § Controller rule and § Bundled emulators, Dolphin. `dolphin-game`
+# changes any of the choices for one game. Does nothing until Dolphin has been set up by its first
+# game.
+#
+# ansible.builtin only (the bundle has no community.general, so no ini_file). The controller files
+# belong to the Controller rule and are written whole; Dolphin.ini and GFX.ini are the user's too,
+# so only the keys below are set, each inside its own section. Every key set is unique in its file.
+- name: Dolphin settings
+  hosts: all  # a scoped patch runs for its targets, one host each
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/dolphin/mapping.yml"
+  vars:
+    x_scope: emulator
+    x_emulators: [dolphin]
+    x_settings:
+      buttons:
+        title: Button layout
+        description: >-
+          Xbox puts A on the bottom face button, as the Deck labels it. Nintendo puts A on the
+          right and B on the bottom, where a GameCube, Classic or Switch Pro controller has them.
+        choices:
+          xbox: Xbox (A at the bottom)
+          nintendo: Nintendo (A on the right)
+        default: xbox
+      port1: &port
+        title: GameCube port 1
+        description: What's plugged in. The wheel, bongos and mat take their input from that player's pad.
+        choices:
+          gc: GameCube controller
+          none: Nothing
+          steering: Steering wheel
+          bongos: DK Bongos
+          dancemat: Dance mat
+        default: gc
+      port2: {<<: *port, title: GameCube port 2}
+      port3: {<<: *port, title: GameCube port 3}
+      port4: {<<: *port, title: GameCube port 4}
+      wii_remotes:
+        title: Wii Remotes
+        description: How many are connected, for players 1 up.
+        choices: {"1": "1", "2": "2", "3": "3", "4": "4"}
+        default: "4"
+      wii_extension:
+        title: Wii Remote extension
+        choices:
+          nunchuk: Nunchuk
+          classic: Classic Controller (Pro)
+          none: None
+        default: nunchuk
+      wii_sideways:
+        title: Sideways Wii Remote
+        description: For games held like an NES pad. 2 and 1 go where A and B are.
+        default: false
+      resolution:
+        title: Internal resolution
+        description: Native is the console's 480 lines. The Deck's screen is 800 lines; 2x is sharper and heavier.
+        choices:
+          "1": Native
+          "2": 2x
+          "3": 3x
+          "4": 4x
+        default: "1"
+      aspect:
+        title: Aspect ratio
+        choices:
+          auto: Auto
+          wide: "16:9"
+          standard: "4:3"
+          stretch: Stretch to the screen
+        default: auto
+      widescreen_hack:
+        title: Widescreen hack
+        description: Draws more of the scene at the sides in 4:3 games. Some games show glitches at the edges.
+        default: false
+    # The folder holding Dolphin.ini, from the central `settings` patch.
+    target: "{{ dolphin_local_config | expanduser if dolphin == 'external' else dolphin_config }}"
+    ini:
+      # Wii saves: title/<type>/<id>/data and shared2/ (Pulsar mods) under it.
+      - {file: Dolphin.ini, section: General, key: NANDRootPath, value: "{{ saves }}/wii/dolphin"}
+      # GameCube saves: Dolphin adds the region folder, <USA|JPN|EUR>/<file>.gci.
+      - {file: Dolphin.ini, section: Core, key: SlotA, value: "8"}  # GCI folder
+      - {file: Dolphin.ini, section: Core, key: GCIFolderAPath, value: "{{ saves }}/gc/dolphin"}
+      - {file: Dolphin.ini, section: Core, key: SIDevice0, value: "{{ port_devices[port1] }}"}
+      - {file: Dolphin.ini, section: Core, key: SIDevice1, value: "{{ port_devices[port2] }}"}
+      - {file: Dolphin.ini, section: Core, key: SIDevice2, value: "{{ port_devices[port3] }}"}
+      - {file: Dolphin.ini, section: Core, key: SIDevice3, value: "{{ port_devices[port4] }}"}
+      # Real Wii Remotes would bypass Steam Input.
+      - {file: Dolphin.ini, section: Core, key: WiimoteContinuousScanning, value: "False"}
+      - {file: GFX.ini, section: Settings, key: InternalResolution, value: "{{ resolution }}"}
+      - {file: GFX.ini, section: Settings, key: AspectRatio, value: "{{ aspect_ratios[aspect] }}"}
+      - {file: GFX.ini, section: Settings, key: wideScreenHack, value: "{{ 'True' if widescreen_hack | bool else 'False' }}"}
+  tasks:
+    - name: Find Dolphin's config
+      ansible.builtin.stat:
+        path: "{{ target }}/Dolphin.ini"
+      register: config
+
+    - name: Config sections
+      ansible.builtin.lineinfile:
+        path: "{{ target }}/{{ item.0 }}"
+        line: "[{{ item.1 }}]"
+        create: true
+        mode: "0644"
+      # (file, section) pairs, each once.
+      loop: "{{ ini | map(attribute='file') | zip(ini | map(attribute='section')) | map('list') | unique | list }}"
+      when: config.stat.exists
+
+    - name: Config settings
+      ansible.builtin.lineinfile:
+        path: "{{ target }}/{{ item.file }}"
+        regexp: '^{{ item.key }}\s*='
+        line: "{{ item.key }} = {{ item.value }}"
+        insertafter: '^\[{{ item.section }}\]$'
+        create: true  # check mode only pretends the section task made GFX.ini
+        mode: "0644"
+      loop: "{{ ini }}"
+      loop_control:
+        label: "{{ item.file }} {{ item.key }}"
+      when: config.stat.exists
+
+    - name: GameCube controllers, players 1-4
+      ansible.builtin.copy:
+        dest: "{{ target }}/GCPadNew.ini"
+        mode: "0644"
+        content: |
+          {% for n in range(4) %}
+          [GCPad{{ n + 1 }}]
+          Device = SDL/{{ n }}/{{ pad }}
+          {% for k, v in gcpad.items() %}
+          {{ k }} = {{ v }}
+          {% endfor %}
+          {% endfor %}
+      when: config.stat.exists
+
+    - name: Wii Remotes, players 1-4
+      ansible.builtin.copy:
+        dest: "{{ target }}/WiimoteNew.ini"
+        mode: "0644"
+        content: |
+          {% for n in range(4) %}
+          [Wiimote{{ n + 1 }}]
+          Device = SDL/{{ n }}/{{ pad }}
+          {% for k, v in wiimote.items() %}
+          {{ k }} = {{ v if k != 'Source' else ('1' if n < wii_remotes | int else '0') }}
+          {% endfor %}
+          {% endfor %}
+          [BalanceBoard]
+          Source = 0
+      when: config.stat.exists
+
+    - name: Hotkeys from player 1's pad (L3 + R3 quits)
+      ansible.builtin.copy:
+        dest: "{{ target }}/Hotkeys.ini"
+        mode: "0644"
+        content: |
+          [Hotkeys]
+          Device = SDL/0/{{ pad }}
+          General/Exit = @(`Thumb L`+`Thumb R`)
+      when: config.stat.exists

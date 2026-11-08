@@ -1,0 +1,181 @@
+# Dolphin's controller and picture choices for one game, over the `dolphin` patch's. Whatever this
+# game doesn't set comes from there (x_inherit). design.md § Bundled emulators, Dolphin.
+#
+# Dolphin's own per-game mechanism: GameSettings/<first 3 characters of the game ID>.ini, which
+# Dolphin reads for every region of the game, under the <game ID>.ini its own game properties
+# write (so a choice made in Dolphin's menus still wins). romm-shelf owns that file whole and marks
+# it; one it didn't write is never touched. A button layout or Wii Remote choice is a controller
+# profile per player (Config/Profiles/<type>/romm-shelf/), since that's the only way Dolphin maps
+# controls per game; a profile replaces the whole mapping, so it holds the inherited choices too.
+- name: Dolphin settings for one game
+  hosts: all  # a scoped patch runs for its targets, one host each
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/dolphin/mapping.yml"
+  vars:
+    x_scope: game
+    x_emulators: [dolphin]
+    x_inherit: dolphin
+    x_settings:
+      buttons:
+        title: Button layout
+        choices:
+          xbox: Xbox (A at the bottom)
+          nintendo: Nintendo (A on the right)
+        default: xbox
+      port1: &port
+        title: GameCube port 1
+        choices:
+          gc: GameCube controller
+          none: Nothing
+          steering: Steering wheel
+          bongos: DK Bongos
+          dancemat: Dance mat
+        default: gc
+      port2: {<<: *port, title: GameCube port 2}
+      port3: {<<: *port, title: GameCube port 3}
+      port4: {<<: *port, title: GameCube port 4}
+      wii_remotes:
+        title: Wii Remotes
+        choices: {"1": "1", "2": "2", "3": "3", "4": "4"}
+        default: "4"
+      wii_extension:
+        title: Wii Remote extension
+        choices:
+          nunchuk: Nunchuk
+          classic: Classic Controller (Pro)
+          none: None
+        default: nunchuk
+      wii_sideways:
+        title: Sideways Wii Remote
+        default: false
+      resolution:
+        title: Internal resolution
+        choices:
+          "1": Native
+          "2": 2x
+          "3": 3x
+          "4": 4x
+        default: "1"
+      aspect:
+        title: Aspect ratio
+        choices:
+          auto: Auto
+          wide: "16:9"
+          standard: "4:3"
+          stretch: Stretch to the screen
+        default: auto
+      widescreen_hack:
+        title: Widescreen hack
+        default: false
+    marker: "# Managed by romm-shelf (patch dolphin-game); clear this game's settings to take it out."
+    external: "{{ dolphin == 'external' }}"
+    target: "{{ dolphin_local_config | expanduser if external else dolphin_config }}"
+    data: "{{ dolphin_local_data | expanduser if external else dolphin_config | dirname }}"
+    game_id: "{{ game.id | default('') }}"
+    game_ini: "{{ data }}/GameSettings/{{ game_id[:3] }}.ini"
+    here: "{{ x_here | dict2items | selectattr('value') | map(attribute='key') | list }}"
+    own: "{{ here | length > 0 }}"
+    # A profile replaces the whole mapping, so one is wanted when this game sets any mapping choice.
+    gc_profiles: "{{ 'buttons' in here }}"
+    wii_profiles: "{{ here | intersect(['buttons', 'wii_extension', 'wii_sideways']) | length > 0 }}"
+    controls: |
+      {% for n in range(4) if ('port' ~ (n + 1)) in here %}
+      PadType{{ n }} = {{ port_devices[lookup('ansible.builtin.vars', 'port' ~ (n + 1))] }}
+      {% endfor %}
+      {% if 'wii_remotes' in here %}
+      {% for n in range(4) %}
+      WiimoteSource{{ n }} = {{ '1' if n < wii_remotes | int else '0' }}
+      {% endfor %}
+      {% endif %}
+      {% for n in range(1, 5) %}
+      {% if gc_profiles | bool %}
+      PadProfile{{ n }} = {{ gc_profile }}-p{{ n }}
+      {% endif %}
+      {% if wii_profiles | bool %}
+      WiimoteProfile{{ n }} = {{ wii_profile }}-p{{ n }}
+      {% endif %}
+      {% endfor %}
+    video: |
+      {% if 'resolution' in here %}
+      InternalResolution = {{ resolution }}
+      {% endif %}
+      {% if 'aspect' in here %}
+      AspectRatio = {{ aspect_ratios[aspect] }}
+      {% endif %}
+      {% if 'widescreen_hack' in here %}
+      wideScreenHack = {{ 'True' if widescreen_hack | bool else 'False' }}
+      {% endif %}
+    content: |
+      {{ marker }}
+      {% if controls | trim %}
+      [Controls]
+      {{ controls | trim }}
+      {% endif %}
+      {% if video | trim %}
+      [Video_Settings]
+      {{ video | trim }}
+      {% endif %}
+    profiles: >-
+      {{ (range(1, 5) | map('string') | map('regex_replace', '^', 'GCPad/' ~ gc_profile ~ '-p') | list if gc_profiles | bool else [])
+         + (range(1, 5) | map('string') | map('regex_replace', '^', 'Wiimote/' ~ wii_profile ~ '-p') | list if wii_profiles | bool else []) }}
+  tasks:
+    - name: Find Dolphin's config
+      ansible.builtin.stat:
+        path: "{{ target }}/Dolphin.ini"
+      register: config
+
+    - name: Check the game has a game ID
+      ansible.builtin.assert:
+        that: game_id | length == 6
+        msg: "{{ game.key }}: no GameCube or Wii game ID found in {{ game.content }}"
+      when: own | bool
+
+    - name: Check this game's settings file is romm-shelf's
+      ansible.builtin.assert:
+        that: existing == '' or marker in existing
+        msg: "{{ game_ini }} wasn't written by romm-shelf; move it aside to set this game here"
+      when: own | bool
+      vars:
+        existing: "{{ lookup('ansible.builtin.file', game_ini, errors='ignore') | default('', true) }}"
+
+    - name: Make the folders
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ [data ~ '/GameSettings'] + (profiles | map('regex_replace', '^', target ~ '/Profiles/') | map('dirname') | unique | list) }}"
+      when: config.stat.exists and own | bool
+
+    - name: Controller profiles, players 1-4
+      ansible.builtin.copy:
+        dest: "{{ target }}/Profiles/{{ item }}.ini"
+        mode: "0644"
+        content: |
+          [Profile]
+          Device = SDL/{{ player - 1 }}/{{ pad }}
+          {% for k, v in (gcpad if item.startswith('GCPad/') else wiimote).items() if k != 'Source' %}
+          {{ k }} = {{ v }}
+          {% endfor %}
+      loop: "{{ profiles }}"
+      vars:
+        player: "{{ item[-1] | int }}"
+      when: config.stat.exists and own | bool
+
+    - name: This game's settings
+      ansible.builtin.copy:
+        dest: "{{ game_ini }}"
+        mode: "0644"
+        content: "{{ content }}"
+      when: config.stat.exists and own | bool
+
+    - name: Take this game's settings out
+      ansible.builtin.file:
+        path: "{{ game_ini }}"
+        state: absent
+      when:
+        - not own | bool
+        - game_id | length == 6
+        - marker in existing
+      vars:
+        existing: "{{ lookup('ansible.builtin.file', game_ini, errors='ignore') | default('', true) }}"

@@ -1,0 +1,155 @@
+# romm-shelf's own settings: what it uses to run games and where it looks, not how an emulator is
+# configured. Every patch also gets these as extra vars, and the CLI/UI read them as
+# `romm-shelf patches set settings KEY=VALUE`. An ROMM_SHELF_<KEY> environment variable wins over
+# the saved value, so a launch can override one without changing config.
+- name: romm-shelf settings
+  hosts: localhost
+  gather_facts: false
+  vars:
+    x_settings:
+      retroarch:
+        title: RetroArch
+        description: Which RetroArch romm-shelf launches games with.
+        choices:
+          builtin: Built into romm-shelf
+          external: Installed on this system
+        default: builtin
+      retroarch_command:
+        title: External RetroArch command
+        description: How to start it, e.g. flatpak run org.libretro.RetroArch. Its own cores are used.
+        default: retroarch
+        show_if: {retroarch: external}
+      retroarch_local_config:
+        title: External RetroArch config
+        description: The flatpak's is ~/.var/app/org.libretro.RetroArch/config/retroarch/retroarch.cfg
+        default: ~/.config/retroarch/retroarch.cfg
+        show_if: {retroarch: external}
+      dolphin:
+        title: Dolphin
+        description: Which Dolphin romm-shelf launches GameCube and Wii games with.
+        choices:
+          builtin: Built into romm-shelf
+          external: Installed on this system
+        default: builtin
+      dolphin_command:
+        title: External Dolphin command
+        description: How to start it, e.g. flatpak run org.DolphinEmu.dolphin-emu.
+        default: dolphin-emu
+        show_if: {dolphin: external}
+      dolphin_local_config:
+        title: External Dolphin config folder
+        description: The folder holding its Dolphin.ini. The flatpak's is ~/.var/app/org.DolphinEmu.dolphin-emu/config/dolphin-emu
+        default: ~/.config/dolphin-emu
+        show_if: {dolphin: external}
+      dolphin_local_data:
+        title: External Dolphin data folder
+        description: The folder holding its GameSettings. The flatpak's is ~/.var/app/org.DolphinEmu.dolphin-emu/data/dolphin-emu
+        default: ~/.local/share/dolphin-emu
+        show_if: {dolphin: external}
+      pcsx2:
+        title: PCSX2
+        description: Which PCSX2 romm-shelf launches PlayStation 2 games with.
+        choices:
+          builtin: Built into romm-shelf
+          external: Installed on this system
+        default: builtin
+      pcsx2_command:
+        title: External PCSX2 command
+        description: How to start it, e.g. flatpak run net.pcsx2.PCSX2.
+        default: pcsx2-qt
+        show_if: {pcsx2: external}
+      pcsx2_local_config:
+        title: External PCSX2 config folder
+        description: The folder holding its PCSX2.ini. The flatpak's is ~/.var/app/net.pcsx2.PCSX2/config/PCSX2/inis
+        default: ~/.config/PCSX2/inis
+        show_if: {pcsx2: external}
+      ppsspp:
+        title: PPSSPP
+        description: Which PPSSPP romm-shelf launches PlayStation Portable games with.
+        choices:
+          builtin: Built into romm-shelf
+          external: Installed on this system
+        default: builtin
+      ppsspp_command:
+        title: External PPSSPP command
+        description: How to start it, e.g. flatpak run org.ppsspp.PPSSPP.
+        default: ppsspp
+        show_if: {ppsspp: external}
+      ppsspp_local_config:
+        title: External PPSSPP config folder
+        description: The folder holding its ppsspp.ini and controls.ini. The flatpak's is ~/.var/app/org.ppsspp.PPSSPP/config/ppsspp/PSP/SYSTEM
+        default: ~/.config/ppsspp/PSP/SYSTEM
+        show_if: {ppsspp: external}
+      rpcs3:
+        title: RPCS3
+        description: Which RPCS3 romm-shelf launches PlayStation 3 games with.
+        choices:
+          builtin: Built into romm-shelf
+          external: Installed on this system
+        default: builtin
+      rpcs3_command:
+        title: External RPCS3 command
+        description: How to start it, e.g. flatpak run net.rpcs3.RPCS3.
+        default: rpcs3
+        show_if: {rpcs3: external}
+      rpcs3_local_config:
+        title: External RPCS3 config folder
+        description: The folder holding its config.yml and input_configs/. The flatpak's is ~/.var/app/net.rpcs3.RPCS3/config/rpcs3
+        default: ~/.config/rpcs3
+        show_if: {rpcs3: external}
+      azahar:
+        title: Azahar
+        description: Which Azahar romm-shelf launches Nintendo 3DS games with.
+        choices:
+          builtin: Built into romm-shelf
+          external: Installed on this system
+        default: builtin
+      azahar_command:
+        title: External Azahar command
+        description: How to start it, e.g. flatpak run org.azahar_emu.Azahar.
+        default: azahar
+        show_if: {azahar: external}
+      azahar_local_config:
+        title: External Azahar config folder
+        description: The folder holding its qt-config.ini. The flatpak's is ~/.var/app/org.azahar_emu.Azahar/config/azahar-emu
+        default: ~/.config/azahar-emu
+        show_if: {azahar: external}
+      cemu:
+        title: Cemu
+        description: Which Cemu romm-shelf launches Wii U games with.
+        choices:
+          builtin: Built into romm-shelf
+          external: Installed on this system
+        default: builtin
+      cemu_command:
+        title: External Cemu command
+        description: How to start it, e.g. flatpak run info.cemu.Cemu.
+        default: cemu
+        show_if: {cemu: external}
+      cemu_local_config:
+        title: External Cemu config folder
+        description: The folder holding its settings.xml. Cemu's own is ~/.config/Cemu
+        default: ~/.config/Cemu
+        show_if: {cemu: external}
+      eden:
+        title: Eden
+        description: Which Eden romm-shelf launches Nintendo Switch games with.
+        choices:
+          builtin: Built into romm-shelf
+          external: Installed on this system
+        default: builtin
+      eden_command:
+        title: External Eden command
+        description: How to start it, e.g. flatpak run org.eden_emu.eden.
+        default: eden
+        show_if: {eden: external}
+      eden_local_config:
+        title: External Eden config folder
+        description: The folder holding its qt-config.ini. Eden's own is ~/.config/eden
+        default: ~/.config/eden
+        show_if: {eden: external}
+  tasks:
+    - name: Settings are read by romm-shelf itself
+      ansible.builtin.debug:
+        msg: "retroarch = {{ retroarch }}, dolphin = {{ dolphin }}, pcsx2 = {{ pcsx2 }}, ppsspp = {{ ppsspp }}, rpcs3 = {{ rpcs3 }}, azahar = {{ azahar }}, cemu = {{ cemu }}, eden = {{ eden }}"
+      changed_when: false

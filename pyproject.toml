@@ -3,7 +3,7 @@ name = "romm-shelf"
 version = "0.1.0"
 description = "Controller-driven RomM client for RetroDECK: downloads and save sync"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
@@ -14,6 +14,11 @@ dependencies = [
     "typer>=0.12",
     "jeepney>=0.9.0",
     "cryptography>=42",
+    # Exact: patches run under Mitogen, which lags new ansible-core releases. flake.nix pins the
+    # same two versions; change them together.
+    "ansible-core==2.21.1",
+    "mitogen==0.3.54",
+    "pyyaml>=6.0.3",
 ]
 
 [project.scripts]
@@ -27,9 +32,70 @@ retroarch = "romm_shelf_retroarch:RetroArchAdapter"
 dolphin = "romm_shelf_dolphin:DolphinAdapter"
 eden = "romm_shelf_eden:EdenAdapter"
 pcsx2 = "romm_shelf_pcsx2:Pcsx2Adapter"
+ppsspp = "romm_shelf_ppsspp:PpssppAdapter"
+rpcs3 = "romm_shelf_rpcs3:Rpcs3Adapter"
+azahar = "romm_shelf_azahar:AzaharAdapter"
+cemu = "romm_shelf_cemu:CemuAdapter"
+native = "romm_shelf.native:NativeAdapter"
+proton = "romm_shelf.proton:ProtonAdapter"
 
 [project.entry-points."romm_shelf.externals"]
 eden = "romm_shelf_eden:EDEN"
+
+[project.entry-points."romm_shelf.emulators"]
+mesen = "romm_shelf_retroarch:MESEN"
+snes9x = "romm_shelf_retroarch:SNES9X"
+mesen-s = "romm_shelf_retroarch:MESEN_S"
+gambatte = "romm_shelf_retroarch:GAMBATTE"
+mgba = "romm_shelf_retroarch:MGBA"
+genesis-plus-gx = "romm_shelf_retroarch:GENESIS_PLUS_GX"
+picodrive = "romm_shelf_retroarch:PICODRIVE"
+mupen64plus-next = "romm_shelf_retroarch:MUPEN64PLUS"
+parallel-n64 = "romm_shelf_retroarch:PARALLEL_N64"
+melonds = "romm_shelf_retroarch:MELONDS"
+swanstation = "romm_shelf_retroarch:SWANSTATION"
+beetle-saturn = "romm_shelf_retroarch:BEETLE_SATURN"
+beetle-pce = "romm_shelf_retroarch:BEETLE_PCE"
+beetle-pcfx = "romm_shelf_retroarch:BEETLE_PCFX"
+beetle-supergrafx = "romm_shelf_retroarch:BEETLE_SUPERGRAFX"
+beetle-vb = "romm_shelf_retroarch:BEETLE_VB"
+beetle-wswan = "romm_shelf_retroarch:BEETLE_WSWAN"
+beetle-ngp = "romm_shelf_retroarch:BEETLE_NGP"
+flycast = "romm_shelf_retroarch:FLYCAST"
+fbneo = "romm_shelf_retroarch:FBNEO"
+fbalpha2012 = "romm_shelf_retroarch:FBALPHA2012"
+neocd = "romm_shelf_retroarch:NEOCD"
+mame = "romm_shelf_retroarch:MAME"
+opera = "romm_shelf_retroarch:OPERA"
+puae = "romm_shelf_retroarch:PUAE"
+stella = "romm_shelf_retroarch:STELLA"
+prosystem = "romm_shelf_retroarch:PROSYSTEM"
+atari800 = "romm_shelf_retroarch:ATARI800"
+virtual-jaguar = "romm_shelf_retroarch:VIRTUAL_JAGUAR"
+handy = "romm_shelf_retroarch:HANDY"
+hatari = "romm_shelf_retroarch:HATARI"
+o2em = "romm_shelf_retroarch:O2EM"
+freeintv = "romm_shelf_retroarch:FREEINTV"
+bluemsx = "romm_shelf_retroarch:BLUEMSX"
+vice-x64sc = "romm_shelf_retroarch:VICE_X64SC"
+vice-xplus4 = "romm_shelf_retroarch:VICE_XPLUS4"
+vice-xvic = "romm_shelf_retroarch:VICE_XVIC"
+dosbox-pure = "romm_shelf_retroarch:DOSBOX_PURE"
+easyrpg = "romm_shelf_retroarch:EASYRPG"
+np2kai = "romm_shelf_retroarch:NP2KAI"
+same-cdi = "romm_shelf_retroarch:SAME_CDI"
+scummvm = "romm_shelf_retroarch:SCUMMVM"
+tic80 = "romm_shelf_retroarch:TIC80"
+vecx = "romm_shelf_retroarch:VECX"
+fuse = "romm_shelf_retroarch:FUSE"
+eightyone = "romm_shelf_retroarch:EIGHTYONE"
+dolphin = "romm_shelf_dolphin:DOLPHIN"
+pcsx2 = "romm_shelf_pcsx2:PCSX2"
+ppsspp = "romm_shelf_ppsspp:PPSSPP"
+rpcs3 = "romm_shelf_rpcs3:RPCS3"
+azahar = "romm_shelf_azahar:AZAHAR"
+cemu = "romm_shelf_cemu:CEMU"
+eden = "romm_shelf_eden:EDEN_EMULATOR"
 
 [dependency-groups]
 dev = ["pytest>=8"]
@@ -39,7 +105,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/romm_shelf", "src/romm_shelf_retroarch", "src/romm_shelf_dolphin", "src/romm_shelf_eden", "src/romm_shelf_pcsx2"]
+packages = ["src/romm_shelf", "src/romm_shelf_retroarch", "src/romm_shelf_dolphin", "src/romm_shelf_eden", "src/romm_shelf_pcsx2", "src/romm_shelf_ppsspp", "src/romm_shelf_rpcs3", "src/romm_shelf_azahar", "src/romm_shelf_cemu"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

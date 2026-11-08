@@ -20,12 +20,15 @@ from romm_shelf.romm import RommClient
 SCOPES = [
     "me.read",
     "roms.read",
+    "roms.write",
     "platforms.read",
+    "platforms.write",
     "assets.read",
     "assets.write",
     "firmware.read",
     "devices.read",
     "devices.write",
+    "tasks.run",
 ]
 
 

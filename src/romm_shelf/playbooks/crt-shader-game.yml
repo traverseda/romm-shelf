@@ -1,0 +1,140 @@
+# One game's shader, as a RetroArch game preset: a CRT look, or an edge-smoothing shader that
+# redraws the pixel art as smooth shapes. It is more specific than the core and folder presets the
+# crt-shader patch writes, so it wins for this game only (one preset per game, so smoothing and CRT
+# don't stack). Clearing the setting removes only romm-shelf's file; a preset saved from
+# RetroArch's own menu is never touched.
+# Handhelds never get a CRT shader: Game Gear shares Genesis Plus GX but is left out here.
+# The setting is still called crt_shader so values saved before smoothing was added keep working.
+- name: Shader for one game
+  hosts: all  # a scoped patch runs for its targets, one host each
+  gather_facts: false
+  vars:
+    x_scope: game
+    x_emulators: [mesen, snes9x, genesis-plus-gx]
+    x_systems: [nes, famicom, fds, snes, sfc, snesna, genesis, megadrive, mastersystem, segacd, megacd, sg-1000]
+    x_settings:
+      crt_shader:
+        title: Shader
+        description: >-
+          CRT shaders add scanlines. Smoothing shaders round off the pixel edges instead: ScaleFX
+          suits most games, VectorScale is the heaviest. One shader per game; they don't stack.
+        inherit: the console's shader
+        choices:
+          guest-deck: Guest (Deck)
+          guest: Guest
+          zfast: zfast-crt
+          lottes: Lottes
+          easymode: Easymode
+          geom: Geom (curved)
+          scalefx: Smooth · ScaleFX
+          xbrz: Smooth · xBRZ
+          super-xbr: Smooth · Super-xBR
+          vectorscale: Smooth · VectorScale
+          super-2xsai: Smooth · 2xSaI
+          supereagle: Smooth · Super Eagle
+        default: guest-deck
+    marker: "# Managed by romm-shelf (patch crt-shader-game); clear this game's shader to take it out."
+    # Stock presets in libretro's slang-shaders, plus parameters changed on top.
+    shaders:
+      guest-deck:
+        preset: crt/crt-guest-advanced-fast.slangp
+        parameters: {shadowMask: "-1.000000"}
+      guest: {preset: crt/crt-guest-advanced-fast.slangp}
+      zfast: {preset: crt/zfast-crt.slangp}
+      lottes: {preset: crt/crt-lottes-fast.slangp}
+      easymode: {preset: crt/crt-easymode.slangp}
+      geom: {preset: crt/crt-geom.slangp}
+      scalefx: {preset: edge-smoothing/scalefx/scalefx.slangp}
+      xbrz: {preset: edge-smoothing/xbrz/xbrz-freescale-multipass.slangp}
+      super-xbr: {preset: edge-smoothing/xbr/super-xbr.slangp}
+      vectorscale: {preset: edge-smoothing/vectorscale/vectorscale.slangp}
+      super-2xsai: {preset: edge-smoothing/eagle/super-2xsai.slangp}
+      supereagle: {preset: edge-smoothing/eagle/supereagle.slangp}
+    chosen: "{{ shaders.get(crt_shader, {}) }}"
+    own: "{{ x_here.get('crt_shader', false) }}"
+    # RetroArch's automatic presets live under <config dir>/config/<Core>/, named after the core's
+    # library name. Game presets use the content name, which is what `game.name` is.
+    folder: "{{ retroarch_config | dirname }}/config"
+    preset_dirs:
+      mesen_libretro: Mesen
+      snes9x_libretro: Snes9x
+      genesis_plus_gx_libretro: Genesis Plus GX
+    preset_dir: "{{ preset_dirs.get(emulator.core | default(''), '') }}"
+    preset: "{{ folder }}/{{ preset_dir }}/{{ game.name }}.slangp"
+    content: |
+      #reference "{{ retroarch_shaders }}/{{ chosen.preset | default('') }}"
+      {{ marker }}
+      {% for k, v in (chosen.parameters | default({})).items() %}
+      {{ k }} = "{{ v }}"
+      {% endfor %}
+  tasks:
+    - name: Check the core has a shader preset folder
+      ansible.builtin.assert:
+        that: emulator.core in preset_dirs
+        msg: "{{ emulator.core | default('this core') }} has no RetroArch shader preset folder"
+      when: own | bool
+
+    - name: Find RetroArch's config
+      ansible.builtin.stat:
+        path: "{{ retroarch_config }}"
+      register: config
+
+    - name: Make the core's preset folder
+      ansible.builtin.file:
+        path: "{{ folder }}/{{ preset_dir }}"
+        state: directory
+        mode: "0755"
+      when:
+        - config.stat.exists
+        - own | bool
+        - preset_dir | length > 0
+
+    # A preset is ours if it carries the marker. One without it was saved by the user from
+    # RetroArch's menu (it rewrites the file without comments) and is left alone.
+    - name: Write this game's shader preset
+      ansible.builtin.copy:
+        dest: "{{ preset }}"
+        content: "{{ content }}"
+        mode: "0644"
+      when:
+        - config.stat.exists
+        - own | bool
+        - preset_dir | length > 0
+        - existing == '' or marker in existing
+      vars:
+        existing: "{{ lookup('ansible.builtin.file', preset, errors='ignore') | default('', true) }}"
+
+    - name: Take this game's preset out
+      ansible.builtin.file:
+        path: "{{ preset }}"
+        state: absent
+      when:
+        - not own | bool
+        - marker in existing
+      vars:
+        existing: "{{ lookup('ansible.builtin.file', preset, errors='ignore') | default('', true) }}"
+
+    - name: Turn shaders on
+      ansible.builtin.lineinfile:
+        path: "{{ retroarch_config }}"
+        regexp: '^{{ item }}\s*='
+        line: '{{ item }} = "true"'
+      loop: [video_shader_enable, auto_shaders_enable]
+      when:
+        - config.stat.exists
+        - own | bool
+
+    # Slang shaders need the vulkan or glcore driver; gl, RetroArch's default on Linux, can't run them.
+    - name: Use a video driver that runs slang shaders
+      ansible.builtin.lineinfile:
+        path: "{{ retroarch_config }}"
+        regexp: '^video_driver\s*='
+        line: 'video_driver = "vulkan"'
+      when:
+        - config.stat.exists
+        - own | bool
+        - driver not in ['vulkan', 'glcore']
+      vars:
+        driver: >-
+          {{ lookup('ansible.builtin.file', retroarch_config)
+             | regex_search('(?m)^video_driver\s*=\s*"([^"]*)"', '\1') | default(['gl'], true) | first }}

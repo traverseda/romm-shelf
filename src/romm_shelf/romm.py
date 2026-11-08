@@ -5,7 +5,9 @@ are ignored. The full spec is in docs/reference/.
 """
 
 import re
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -15,6 +17,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 
 MIN_VERSION = (5, 4)
+UPLOAD_CHUNK = 32 * 2**20  # RomM's hard cap is 64 MB; a smaller one loses less to a dropped connection
 
 
 class _Model(BaseModel):
@@ -27,6 +30,16 @@ class Platform(_Model):
     fs_slug: str
     name: str
     rom_count: int
+
+
+class RomFile(_Model):
+    file_name: str
+    file_path: str
+    is_top_level: bool = False
+    id: int | None = None
+    category: str | None = None
+    """RomM's category from the folder a file sits in: `patch`, `dlc`, `update`, …; None for the game."""
+    md5_hash: str | None = None
 
 
 class Rom(_Model):
@@ -44,8 +57,12 @@ class Rom(_Model):
     has_multiple_files: bool = False
     has_nested_single_file: bool = False
     """A folder whose only top-level entry is one file; deeper files may sit below it."""
+    files: list[RomFile] = []
     path_cover_small: str | None = None
     path_cover_large: str | None = None
+    merged_screenshots: list[str] = []
+    path_manual: str | None = None
+    path_video: str | None = None
 
     @property
     def is_folder(self) -> bool:
@@ -145,15 +162,95 @@ class RommClient:
     def platforms(self) -> list[Platform]:
         return [Platform.model_validate(p) for p in self._get("/platforms")]
 
-    def roms(self, page_size: int = 500) -> Iterator[Rom]:
-        offset = 0
+    def rom_details(self, rom_id: int) -> dict:
+        """The ROM as RomM sends it, with every metadata field the Rom model leaves out."""
+        return self._get(f"/roms/{rom_id}")
+
+    def update_rom(self, rom_id: int, fields: dict[str, str]) -> None:
+        # RomM takes this as multipart/form-data; httpx only sends that with `files`.
+        self.http.put(f"/roms/{rom_id}", files={k: (None, v) for k, v in fields.items()},
+                      timeout=120).raise_for_status()
+
+    def ensure_platform(self, fs_slug: str) -> int:
+        """The platform's id, creating it in RomM if it has no such folder yet."""
+        for p in self.platforms():
+            if p.fs_slug == fs_slug:
+                return p.id
+        return Platform.model_validate(self._post("/platforms", {"fs_slug": fs_slug})).id
+
+    def scan_platform(self, fs_slug: str) -> dict:
+        """Ask RomM to scan one platform now, after a direct upload."""
+        return self._post("/tasks/scan", {"platform_fs_slugs": [fs_slug]})
+
+    def task(self, task_id: str) -> dict:
+        return self._get(f"/tasks/{task_id}")
+
+    def wait_for_task(self, task_id: str, *, timeout: float = 300, interval: float = 1) -> dict:
+        """Poll until the task leaves the queue, and return its last status."""
+        deadline = time.monotonic() + timeout
         while True:
-            page = self._get("/roms", limit=page_size, offset=offset)
-            for item in page["items"]:
-                yield Rom.model_validate(item)
-            offset += len(page["items"])
-            if not page["items"] or offset >= page["total"]:
-                return
+            status = self.task(task_id)
+            if status.get("status") in ("finished", "failed", "stopped", "canceled"):
+                return status
+            if time.monotonic() >= deadline:
+                raise RommError(f"task {task_id} did not finish within {timeout:.0f}s")
+            time.sleep(interval)
+
+    def upload_rom(self, platform_id: int, path: Path, file_name: str, progress=None,
+                   chunk_size: int = UPLOAD_CHUNK, retries: int = 3) -> None:
+        """A large file, in chunks. One dropped chunk over a slow link is retried, not fatal."""
+        size = path.stat().st_size
+        chunks = max(1, -(-size // chunk_size))
+        # RomM checks every chunk against this exact size, the last one taking what's left.
+        chunk_size = (size + chunks - 1) // chunks
+        r = self.http.post("/roms/upload/start", headers={
+            "x-upload-platform": str(platform_id), "x-upload-filename": file_name,
+            "x-upload-total-size": str(size), "x-upload-total-chunks": str(chunks)})
+        r.raise_for_status()
+        upload_id = r.json()["upload_id"]
+        try:
+            with path.open("rb") as f:
+                for index in range(chunks):
+                    data = f.read(chunk_size)
+                    for attempt in range(retries):
+                        try:
+                            r = self.http.put(f"/roms/upload/{upload_id}", content=data,
+                                              headers={"x-chunk-index": str(index)}, timeout=600)
+                            r.raise_for_status()
+                            break
+                        except httpx.TransportError:
+                            if attempt == retries - 1:
+                                raise
+                    if progress:
+                        progress(min((index + 1) * chunk_size, size), size)
+            self.http.post(f"/roms/upload/{upload_id}/complete", timeout=600).raise_for_status()
+        except BaseException:
+            try:
+                self.http.post(f"/roms/upload/{upload_id}/cancel")
+            except httpx.HTTPError:
+                pass  # the failure that got us here is the one to report
+            raise
+
+    def roms(self, page_size: int = 500, parallel: int = 4, platform_ids: list[int] | None = None) -> Iterator[Rom]:
+        """Every ROM, or only those of `platform_ids` (an empty list is none, not all)."""
+        if platform_ids is not None and not platform_ids:
+            return
+        filters = {} if platform_ids is None else {"platform_ids": platform_ids}
+
+        # Files say which one is a split ROM's game file (content.py); RomM leaves them out by default.
+        def page(offset: int) -> dict:
+            return self._get("/roms", limit=page_size, offset=offset, with_files=True, **filters)
+
+        # RomM takes ~1.5 s per 500-game page, nearly all of it server-side: the first page gives
+        # the total, the rest are fetched side by side (2,800 games: 11 s one by one, ~4 s like this).
+        first = page(0)
+        yield from (Rom.model_validate(item) for item in first["items"])
+        if not first["items"] or len(first["items"]) >= first["total"]:
+            return
+        offsets = range(len(first["items"]), first["total"], len(first["items"]))
+        with ThreadPoolExecutor(parallel) as pool:
+            for rest in pool.map(page, offsets):
+                yield from (Rom.model_validate(item) for item in rest["items"])
 
     def register_device(self, *, name: str, hostname: str, platform: str = "steamos") -> str:
         """Register this device, or find it again. Idempotent on the server (hostname + platform)."""
@@ -233,10 +330,13 @@ class RommClient:
         file = next((f for f in files if f["file_name"] == file_name and f.get("is_top_level")), None)
         if file is None:
             return None
-        # One id in file_ids streams that file as is, not zipped.
-        r = self.http.get(f"/roms/{rom_id}/content/{file_name}", params={"file_ids": file["id"]})
+        return self.rom_file_bytes(rom_id, file["id"], file_name).decode()
+
+    def rom_file_bytes(self, rom_id: int, file_id: int, file_name: str) -> bytes:
+        """One file of a multi-file ROM, at any depth. One id in file_ids streams it as is, not zipped."""
+        r = self.http.get(f"/roms/{rom_id}/content/{file_name}", params={"file_ids": file_id})
         r.raise_for_status()
-        return r.text
+        return r.content
 
     def firmware(self) -> list[dict]:
         return self._get("/firmware")

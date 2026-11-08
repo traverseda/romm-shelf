@@ -1,0 +1,71 @@
+# RPCS3 for every game: Vulkan, fullscreen, and the settings that make the no-gui launch exit
+# when the game does (design.md § Bundled emulators, RPCS3). The input config for Steam Input is
+# seeded on the first run; this patch changes only settings, key by key.
+#
+# ansible.builtin only. RPCS3's config.yml is YAML, so each key is one indented line. The
+# Renderer key exists in two sections, so its regexp accepts only the values the Video section
+# uses, and inserts under Video when it is missing.
+- name: RPCS3 settings
+  hosts: all  # a scoped patch runs for its targets, one host each
+  gather_facts: false
+  vars:
+    x_scope: emulator
+    x_emulators: [rpcs3]
+    x_settings:
+      resolution:
+        title: Resolution scale
+        description: >-
+          RPCS3's internal resolution as a percentage of 720p. 100% is native; 150% and 200% are
+          sharper and heavier.
+        choices:
+          "50": 50%
+          "75": 75%
+          "100": 100%
+          "150": 150%
+          "200": 200%
+        default: "100"
+    external: "{{ rpcs3 == 'external' }}"
+    target: "{{ rpcs3_local_config | expanduser if external else rpcs3_config }}"
+    config: "{{ target }}/config.yml"
+    settings:
+      - {section: Miscellaneous, key: Automatically start games after boot, value: "true"}
+      - {section: Miscellaneous, key: Exit RPCS3 when process finishes, value: "true"}
+      - {section: Miscellaneous, key: Pause emulation on RPCS3 focus loss, value: "false"}
+      - {section: Miscellaneous, key: Start games in fullscreen mode, value: "true"}
+      - {section: Video, key: Resolution Scale, value: "{{ resolution }}"}
+  tasks:
+    - name: Find RPCS3's config
+      ansible.builtin.stat:
+        path: "{{ config }}"
+      register: config_file
+
+    - name: Config sections
+      ansible.builtin.lineinfile:
+        path: "{{ config }}"
+        line: "{{ item }}:"
+        create: true
+        mode: "0644"
+      loop: [Miscellaneous, Video]
+      when: config_file.stat.exists
+
+    - name: Config settings
+      ansible.builtin.lineinfile:
+        path: "{{ config }}"
+        regexp: '^  {{ item.key | regex_escape }}:'
+        line: "  {{ item.key }}: {{ item.value }}"
+        insertafter: '^{{ item.section }}:$'
+        create: true
+        mode: "0644"
+      loop: "{{ settings }}"
+      loop_control:
+        label: "{{ item.section }} {{ item.key }}"
+      when: config_file.stat.exists
+
+    # Renderer also exists under Audio (Cubeb). Restrict the regexp to Video's values.
+    - name: Video renderer
+      ansible.builtin.replace:
+        path: "{{ config }}"
+        regexp: '(?m)^  Renderer: .*$'
+        replace: '  Renderer: Vulkan'
+        after: '(?m)^Video:$'
+      when: config_file.stat.exists

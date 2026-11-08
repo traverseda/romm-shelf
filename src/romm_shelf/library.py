@@ -4,14 +4,29 @@ Nothing is cached on disk: the match is recomputed from the ROM folders and the
 server on every run, as design.md requires.
 """
 
+import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from romm_shelf.content import base_file
 from romm_shelf.romm import Rom
 
 # Files RetroDECK and ES-DE keep in ROM folders that are not games.
 IGNORED_NAMES = {"systeminfo.txt", "metadata.txt", "gamelist.xml"}
+
+
+def _words(text: str) -> str:
+    plain = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", " ", plain.lower()).strip()
+
+
+def name_matches(query: str, *names: str | None) -> bool:
+    """Search as the UI does it (web/index.html, norm): every word of the query, in any of the
+    names, ignoring case, accents and punctuation. "pokemon" finds "Pokémon"."""
+    hay = " ".join(_words(n) for n in names if n)
+    return all(w in hay for w in _words(query).split())
 
 
 @dataclass(frozen=True)
@@ -28,6 +43,8 @@ class LocalRom:
 
 def scan_local(roms_dir: Path) -> list[LocalRom]:
     found = []
+    if not roms_dir.is_dir():  # nothing installed yet
+        return found
     for system_dir in sorted(p for p in roms_dir.iterdir() if p.is_dir() and not p.name.startswith(".")):
         for entry in sorted(system_dir.iterdir()):
             if entry.name.startswith(".") or entry.name in IGNORED_NAMES:
@@ -51,7 +68,11 @@ def match(local: Iterable[LocalRom], remote: Iterable[Rom]) -> Match:
     Hash matching (for renamed files) is a later step; on the test Deck path
     matching covers 1228 of 1230 ROMs.
     """
+    remote = list(remote)
     by_path = {(r.platform_fs_slug, r.fs_name): r for r in remote}
+    # A Switch game with updates and DLC: roms/switch/<game file> is installed from its RomM folder
+    # (design.md § Updates and DLC).
+    split = {(r.platform_fs_slug, b): r for r in remote if (b := base_file(r))}
     result = Match()
     seen = set()
     for rom in local:
@@ -60,6 +81,8 @@ def match(local: Iterable[LocalRom], remote: Iterable[Rom]) -> Match:
         mod = (rom.system, rom.path.stem)
         if key not in by_path and rom.path.suffix == ".json" and mod in by_path and by_path[mod].is_folder:
             key = mod
+        if key not in by_path and key in split:
+            key = (rom.system, split[key].fs_name)
         if key in by_path:
             result.matched.append((rom, by_path[key]))
             seen.add(key)

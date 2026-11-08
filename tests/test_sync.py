@@ -22,7 +22,7 @@ def test_payload_contract(layout, remote):
     body = payload.model_dump(mode="json", exclude_none=True)
     assert body["device_id"] == "dev"
     assert body["rom_ids"] == [1006]
-    assert body["emulators"] == ["dolphin", "eden", "pcsx2", "retroarch"]  # never pair across emulators
+    assert body["emulators"] == ["azahar", "cemu", "dolphin", "eden", "native", "pcsx2", "ppsspp", "proton", "retroarch", "rpcs3"]  # never pair across emulators
     [save] = body["saves"]
     assert save["slot"] == "battery"
     assert save["file_size_bytes"] == 8192

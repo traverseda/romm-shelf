@@ -1,0 +1,69 @@
+# RetroArch takes controllers from Steam Input only, in Steam's order (player 1 is Steam's first
+# controller), and keeps saves where the retroarch save adapter looks: design.md § Controller rule
+# and § Bundled emulators. Does nothing until RetroArch has been set up by its first game.
+- name: RetroArch settings
+  hosts: localhost
+  gather_facts: false
+  vars:
+    x_settings:
+      save_state_on_exit:
+        title: Save state on exit
+        description: >-
+          RetroArch saves the game's state when it closes, so the state romm-shelf uploads on exit
+          is the one you were playing. It is not loaded again next time.
+        default: true
+    # Which RetroArch comes from the central `settings` patch.
+    target: "{{ retroarch_local_config | expanduser if retroarch == 'external' else retroarch_config }}"
+    settings:
+      # SDL2 sees only what Steam leaves visible; udev reads /dev/input and finds the physical pad too.
+      input_joypad_driver: sdl2
+      input_autodetect_enable: "true"
+      input_max_users: "4"
+      input_player1_joypad_index: "0"
+      input_player2_joypad_index: "1"
+      input_player3_joypad_index: "2"
+      input_player4_joypad_index: "3"
+      # Remaps belong to Steam Input.
+      input_remap_binds_enable: "false"
+      auto_remaps_enable: "false"
+      input_menu_toggle_gamepad_combo: "2"  # L3 + R3
+      # Straight into the game: no launch animation, no boot-time on-screen messages.
+      menu_show_load_content_animation: "false"
+      rgui_show_start_screen: "false"
+      notification_show_autoconfig: "false"
+      notification_show_autoconfig_fails: "false"
+      notification_show_config_override_load: "false"
+      notification_show_remap_load: "false"
+      notification_show_refresh_rate: "false"
+      notification_show_set_initial_disk: "false"
+      # Where RetroDECK's RetroArch keeps them: roms/nes/Game.nes saves to saves/nes/Game.srm.
+      savefile_directory: "{{ saves }}"
+      savestate_directory: "{{ states }}"
+      sort_savefiles_enable: "false"
+      sort_savestates_enable: "false"
+      sort_savefiles_by_content_enable: "true"
+      sort_savestates_by_content_enable: "true"
+      savestate_auto_save: "{{ 'true' if save_state_on_exit | bool else 'false' }}"
+      savestate_auto_load: "false"
+      system_directory: "{{ bios }}"
+  tasks:
+    - name: Find RetroArch's config
+      ansible.builtin.stat:
+        path: "{{ target }}"
+      register: config
+
+    # RetroArch ignores a savestate_directory that isn't there and writes its own back on exit.
+    - name: Make the folders its config points at
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+      loop: "{{ [saves, states, bios] }}"
+      when: config.stat.exists
+
+    - name: Set
+      ansible.builtin.lineinfile:
+        path: "{{ target }}"
+        regexp: '^{{ item.key }}\s*='
+        line: '{{ item.key }} = "{{ item.value }}"'
+      loop: "{{ settings | dict2items }}"
+      when: config.stat.exists

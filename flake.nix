@@ -1,7 +1,7 @@
 {
   description = "romm-shelf: a controller-driven RomM client for RetroDECK";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.nix-appimage = {
     url = "github:ralismark/nix-appimage";
     inputs.nixpkgs.follows = "nixpkgs";
@@ -19,8 +19,12 @@
       pkgs = import nixpkgs {
         inherit system;
         overlays = [ nixgl.overlay ];
-        # Non-commercial licences, the same cores libretro ships; nothing else unfree comes in.
-        config.allowUnfreePredicate = p: builtins.elem (nixpkgs.lib.getName p) [ "libretro-snes9x" "libretro-genesis-plus-gx" ];
+        # Non-commercial licences, the same cores libretro ships, and RPCS3 (nixpkgs marks it
+        # unfree because it vendors wolfSSL, whose licence is awkward next to RPCS3's GPL-2.0-only).
+        config.allowUnfreePredicate = p: builtins.elem (nixpkgs.lib.getName p) [
+          "libretro-snes9x" "libretro-genesis-plus-gx" "libretro-opera" "libretro-fbalpha2012"
+          "libretro-fbneo" "libretro-picodrive" "rpcs3"
+        ];
       };
       lib = pkgs.lib;
       py = pkgs.python313Packages;
@@ -49,7 +53,7 @@
         pyproject = true;
         src = lib.fileset.toSource {
           root = ./.;
-          fileset = lib.fileset.unions [ ./pyproject.toml ./README.md ./src ./tests ];
+          fileset = lib.fileset.unions [ ./pyproject.toml ./README.md ./src ./tests ./scripts ];
         };
         build-system = [ py.hatchling ];
         # pyproject.toml's dependencies, from nixpkgs rather than uv.lock.

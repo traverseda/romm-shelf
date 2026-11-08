@@ -1,0 +1,41 @@
+# Whether one game keeps its own entry in Steam's library, overriding the steam-shortcuts patch's
+# choice for every game (design.md § Steam entries). Applying it adds or takes out only this
+# game's entry; Steam lets go of a removed one when it restarts.
+- name: This game in Steam's library
+  hosts: all  # a scoped patch runs for its targets, one host each
+  gather_facts: false
+  vars:
+    x_scope: game
+    x_settings:
+      steam_shortcut:
+        title: In Steam's library
+        description: >-
+          Only while playing: Play adds the game to Steam when you start it, and it's taken out
+          afterwards. It keeps its Steam Input profile either way, because Steam files that under
+          the game's name.
+        inherit: the choice for every game (patch steam-shortcuts)
+        choices:
+          keep: Always
+          while-playing: Only while playing
+        default: keep
+  tasks:
+    - name: What has to change for this game
+      ansible.builtin.command:
+        argv: ["{{ romm_shelf }}", steam, sync, --plan, --json, --game, "{{ game.key }}"]
+      check_mode: false
+      changed_when: false
+      register: plan
+
+    - name: Steam's library
+      ansible.builtin.debug:
+        msg: "{{ item }}"
+      loop: "{{ plan.stdout | from_json }}"
+      changed_when: true
+      when: ansible_check_mode
+
+    - name: Bring this game's entry in line
+      ansible.builtin.command:
+        argv: ["{{ romm_shelf }}", steam, sync, --game, "{{ game.key }}"]
+      when:
+        - not ansible_check_mode
+        - plan.stdout | from_json | length > 0

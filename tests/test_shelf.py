@@ -96,3 +96,14 @@ def test_unsafe_zip_refused(layout):
 def test_existing_target_refused(layout):
     with pytest.raises(FileExistsError):
         shelf.install_plan(rom(1006, "nes", "Wizardry - The Knight of Diamonds.zip"), layout)
+
+
+def test_plan_on_a_fresh_root_without_a_roms_folder(tmp_path):
+    from romm_shelf.layout import RetroDeckLayout
+    root = tmp_path / "romm-shelf"  # nothing created yet, as on a first run
+    layout = RetroDeckLayout(roms=root / "roms", saves=root / "saves", states=root / "states",
+                             bios=root / "bios", mods=root / "mods")
+    plan = shelf.install_plan(rom(77, "ps2", "Game.iso"), layout)
+    assert not root.exists()  # planning changes nothing
+    shelf.install(plan, FakeClient(b"iso bytes"))
+    assert plan.target.read_bytes() == b"iso bytes"

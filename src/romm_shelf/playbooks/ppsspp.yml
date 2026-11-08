@@ -1,0 +1,90 @@
+# PPSSPP for every game: controllers from Steam Input only, in Steam's order (player 1 is Steam's
+# first controller), and saves where the ppsspp save adapter looks (design.md § Controller rule and
+# § Bundled emulators, PPSSPP). Does nothing until PPSSPP has been set up by its first game.
+#
+# ansible.builtin only. PPSSPP keeps its controller mapping in controls.ini, separate from its
+# settings, so the section is made and each binding updated in place.
+- name: PPSSPP settings
+  hosts: all  # a scoped patch runs for its targets, one host each
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/ppsspp/mapping.yml"
+  vars:
+    x_scope: emulator
+    x_emulators: [ppsspp]
+    x_settings:
+      resolution:
+        title: Internal resolution
+        description: >-
+          Native is the PSP's 480x272. 3x is what RetroDECK uses on the Deck and looks sharp
+          without much cost.
+        choices:
+          "1": Native
+          "2": 2x
+          "3": 3x
+          "4": 4x
+        default: "3"
+    external: "{{ ppsspp == 'external' }}"
+    # The folder holding ppsspp.ini and controls.ini, from the central `settings` patch.
+    target: "{{ ppsspp_local_config | expanduser if external else ppsspp_config }}"
+    config: "{{ target }}/ppsspp.ini"
+    controls: "{{ target }}/controls.ini"
+    settings:
+      - {section: General, key: FirstRun, value: "False"}
+      - {section: General, key: CurrentDirectory, value: "{{ roms }}/psp"}
+      - {section: General, key: AskForExitConfirmationAfterSeconds, value: "0"}
+      - {section: General, key: PauseWhenMinimized, value: "False"}
+      - {section: General, key: AutoLoadSaveState, value: "0"}
+      - {section: Graphics, key: FullScreen, value: "True"}
+      - {section: Graphics, key: InternalResolution, value: "{{ resolution }}"}
+      - {section: Graphics, key: DisplayCropTo16x9, value: "True"}
+      - {section: Graphics, key: VerticalSync, value: "True"}
+  tasks:
+    - name: Find PPSSPP's config
+      ansible.builtin.stat:
+        path: "{{ config }}"
+      register: config_file
+
+    - name: Config sections
+      ansible.builtin.lineinfile:
+        path: "{{ config }}"
+        line: "[{{ item }}]"
+        create: true
+        mode: "0644"
+      loop: [General, Graphics]
+      when: config_file.stat.exists
+
+    - name: Config settings
+      ansible.builtin.lineinfile:
+        path: "{{ config }}"
+        regexp: '^{{ item.key }}\s*='
+        line: "{{ item.key }} = {{ item.value }}"
+        insertafter: '^\[{{ item.section }}\]$'
+        create: true
+        mode: "0644"
+      loop: "{{ settings }}"
+      loop_control:
+        label: "{{ item.section }} {{ item.key }}"
+      when: config_file.stat.exists
+
+    - name: Controller mapping section
+      ansible.builtin.lineinfile:
+        path: "{{ controls }}"
+        line: "[ControlMapping]"
+        create: true
+        mode: "0644"
+      when: config_file.stat.exists
+
+    # Player 1 is Steam's first pad: SDL device 0 is PPSSPP device 10 (DEVICE_ID_PAD_0).
+    - name: Controller bindings
+      ansible.builtin.lineinfile:
+        path: "{{ controls }}"
+        regexp: '^{{ item.key | regex_escape }}\s*='
+        line: "{{ item.key }} = {{ item.value }}"
+        insertafter: '^\[ControlMapping\]$'
+        create: true
+        mode: "0644"
+      loop: "{{ bindings | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: config_file.stat.exists

@@ -1,8 +1,9 @@
 """BIOS and firmware: RomM is the single source of truth, devices only pull.
 
-RetroDECK ships a reference list (reference_lists/bios.json) naming every file
-its emulators look for, with checksums and, for some, the folders they belong
-in. romm-shelf uses that list three ways:
+RetroDECK ships a reference list naming every file its emulators look for, with
+checksums and, for some, the folders they belong in: reference_lists/bios.json,
+or since 0.10 a "bios" list in each component's manifest. romm-shelf uses that
+list three ways:
 
 - import: a one-time seeding of RomM from a folder of dumps. Files are matched
   by checksum, not name, and uploaded under the file name RetroDECK expects.
@@ -72,15 +73,44 @@ def _set(v) -> frozenset[str]:
     return frozenset(x.lower() for x in ([v] if isinstance(v, str) else v))
 
 
-def load_entries(settings: Settings) -> list[BiosEntry]:
-    candidates = [settings.bios_list] if settings.bios_list else BIOS_LISTS
+def _manifest_bios(o) -> Iterable[dict]:
+    """Every "bios" list in a component manifest, at whatever depth the component puts it."""
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k == "bios":
+                yield from [v] if isinstance(v, dict) else v
+            else:
+                yield from _manifest_bios(v)
+    elif isinstance(o, list):
+        for v in o:
+            yield from _manifest_bios(v)
+
+
+def _raw_entries(settings: Settings) -> list[dict]:
+    if settings.bios_list:
+        candidates = [settings.bios_list]
+    else:
+        candidates = BIOS_LISTS
+        # RetroDECK 0.10 dropped bios.json; each component's manifest lists its own files.
+        for root in RETRODECK_INSTALLS:
+            manifests = sorted(settings.resolve(root).glob("retrodeck/components/*/component_manifest.json"))
+            if manifests:
+                seen, raw = set(), []
+                for m in manifests:
+                    for e in _manifest_bios(json.loads(m.read_text())):
+                        if (e["filename"], str(e["system"])) not in seen:
+                            seen.add((e["filename"], str(e["system"])))
+                            raw.append(e)
+                return raw
     for path in candidates:
         path = settings.resolve(path)
         if path.exists():
-            raw = json.loads(path.read_text())["bios"]
-            break
-    else:
-        raise SystemExit("RetroDECK's bios.json not found; pass ROMM_SHELF_BIOS_LIST")
+            return json.loads(path.read_text())["bios"]
+    raise SystemExit("RetroDECK's BIOS list not found; pass ROMM_SHELF_BIOS_LIST")
+
+
+def load_entries(settings: Settings) -> list[BiosEntry]:
+    raw = _raw_entries(settings)
     entries = []
     for e in raw:
         systems = e["system"] if isinstance(e["system"], list) else [e["system"]]

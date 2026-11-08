@@ -1,0 +1,146 @@
+# A CRT shader for the home consoles of the CRT era (NES, SNES, Sega's), as RetroArch core presets.
+# Handhelds (Game Boy, GBA, Game Gear) never get one. A preset saved from RetroArch's own menu wins
+# over these and is never overwritten. design.md § Patches, CRT shader.
+- name: CRT shader
+  hosts: localhost
+  gather_facts: false
+  vars:
+    x_settings:
+      crt_shader:
+        title: Shader
+        description: >-
+          Guest keeps the scanlines even at the Deck's 800 lines, where 240p games don't scale by a
+          whole number; Guest (Deck) also drops the phosphor mask, which shows as moiré there.
+          zfast-crt is the lightest. None takes romm-shelf's presets out again.
+        choices:
+          guest-deck: Guest (Deck)
+          guest: Guest
+          zfast: zfast-crt
+          lottes: Lottes
+          easymode: Easymode
+          geom: Geom (curved)
+          none: None
+        default: guest-deck
+      crt_nes:
+        title: NES and Famicom
+        default: true
+      crt_snes:
+        title: SNES
+        default: true
+      crt_sega:
+        title: Sega consoles
+        description: Master System, Mega Drive/Genesis, Mega CD and SG-1000. Game Gear never.
+        default: true
+    marker: "# Managed by romm-shelf (patch crt-shader); set its shader to None and apply to take it out."
+    # Stock presets in libretro's slang-shaders, plus parameters changed on top.
+    shaders:
+      guest-deck:
+        preset: crt/crt-guest-advanced-fast.slangp
+        # The Deck's 1280x800 has too few pixels per source pixel for a phosphor mask: it shows as
+        # moiré and darkens the picture. Scanlines, glow and the rest stay as the author set them.
+        parameters: {shadowMask: "-1.000000"}
+      guest: {preset: crt/crt-guest-advanced-fast.slangp}
+      zfast: {preset: crt/zfast-crt.slangp}
+      lottes: {preset: crt/crt-lottes-fast.slangp}
+      easymode: {preset: crt/crt-easymode.slangp}
+      geom: {preset: crt/crt-geom.slangp}
+    enabled: "{{ crt_shader != 'none' }}"
+    chosen: "{{ shaders.get(crt_shader, {}) }}"
+    # RetroArch's automatic presets live under <config dir>/config/<Core>/. The menu's own
+    # "Save Core Preset" writes there too, so a preset the user saves always wins. Old romm-shelf
+    # versions wrote beside retroarch.cfg, which RetroArch never read; those are taken out below.
+    config_dir: "{{ retroarch_config | dirname }}"
+    folder: "{{ config_dir }}/config"
+    legacy: "{{ config_dir }}"
+    presets:
+      - {path: "Mesen/Mesen.slangp", wanted: "{{ crt_nes }}"}
+      - {path: "Snes9x/Snes9x.slangp", wanted: "{{ crt_snes }}"}
+      - {path: "Genesis Plus GX/Genesis Plus GX.slangp", wanted: "{{ crt_sega }}"}
+      # The same core runs Game Gear, an LCD handheld: its folder preset outranks the core's.
+      - {path: "Genesis Plus GX/gamegear.slangp", wanted: "{{ crt_sega }}", plain: true}
+    crt: |
+      #reference "{{ retroarch_shaders }}/{{ chosen.preset | default('') }}"
+      {{ marker }}
+      {% for k, v in (chosen.parameters | default({})).items() %}
+      {{ k }} = "{{ v }}"
+      {% endfor %}
+    plain: |
+      {{ marker }}
+      shaders = "1"
+      shader0 = "{{ retroarch_shaders }}/stock.slang"
+  tasks:
+    - name: Find RetroArch's config
+      ansible.builtin.stat:
+        path: "{{ retroarch_config }}"
+      register: config
+
+    - name: Make the core folders
+      ansible.builtin.file:
+        path: "{{ folder }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ presets | selectattr('wanted', 'truthy') | map(attribute='path') | map('dirname') | unique }}"
+      when: config.stat.exists and enabled | bool
+
+    # A preset is ours if it carries the marker. One without it was saved by the user from
+    # RetroArch's menu (it rewrites the file without comments) and is left alone.
+    - name: Write the shader presets
+      ansible.builtin.copy:
+        dest: "{{ folder }}/{{ item.path }}"
+        content: "{{ plain if item.plain | default(false) else crt }}"
+        mode: "0644"
+      loop: "{{ presets }}"
+      loop_control: {label: "{{ item.path }}"}
+      when:
+        - config.stat.exists
+        - enabled | bool
+        - item.wanted | bool
+        - existing == '' or marker in existing
+      vars:
+        existing: "{{ lookup('ansible.builtin.file', folder ~ '/' ~ item.path, errors='ignore') | default('', true) }}"
+
+    - name: Take out presets no longer wanted
+      ansible.builtin.file:
+        path: "{{ folder }}/{{ item.path }}"
+        state: absent
+      loop: "{{ presets }}"
+      loop_control: {label: "{{ item.path }}"}
+      when:
+        - not enabled | bool or not item.wanted | bool
+        - marker in existing
+      vars:
+        existing: "{{ lookup('ansible.builtin.file', folder ~ '/' ~ item.path, errors='ignore') | default('', true) }}"
+
+    # Before the config/ folder was used, presets were written beside retroarch.cfg, where
+    # RetroArch never looked. Remove only the ones carrying our marker.
+    - name: Take out presets from the old location
+      ansible.builtin.file:
+        path: "{{ legacy }}/{{ item.path }}"
+        state: absent
+      loop: "{{ presets }}"
+      loop_control: {label: "{{ item.path }}"}
+      when: marker in existing
+      vars:
+        existing: "{{ lookup('ansible.builtin.file', legacy ~ '/' ~ item.path, errors='ignore') | default('', true) }}"
+
+    - name: Turn shaders on
+      ansible.builtin.lineinfile:
+        path: "{{ retroarch_config }}"
+        regexp: '^{{ item }}\s*='
+        line: '{{ item }} = "true"'
+      loop: [video_shader_enable, auto_shaders_enable]
+      when: config.stat.exists and enabled | bool
+
+    # Slang shaders need the vulkan or glcore driver; gl, RetroArch's default on Linux, can't run them.
+    - name: Use a video driver that runs slang shaders
+      ansible.builtin.lineinfile:
+        path: "{{ retroarch_config }}"
+        regexp: '^video_driver\s*='
+        line: 'video_driver = "vulkan"'
+      when:
+        - config.stat.exists and enabled | bool
+        - driver not in ['vulkan', 'glcore']
+      vars:
+        driver: >-
+          {{ lookup('ansible.builtin.file', retroarch_config)
+             | regex_search('(?m)^video_driver\s*=\s*"([^"]*)"', '\1') | default(['gl'], true) | first }}

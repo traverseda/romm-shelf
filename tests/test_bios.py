@@ -143,3 +143,17 @@ def test_removed_file_is_missing_not_found_in_backup(entries, layout):
     firmware = [{"id": 1, "file_name": "gba_bios.bin", "md5_hash": md5(GBA)}]
     [s] = [s for s in bios.status(entries, layout, firmware) if s.entry.filename == "gba_bios.bin"]
     assert s.local == "missing" and bios.gettable(s, layout)
+
+
+def test_entries_from_component_manifests(tmp_path, settings):
+    # RetroDECK 0.10 has no bios.json; each component lists its files, at varying depths.
+    components = tmp_path / "var/lib/flatpak/app/net.retrodeck.retrodeck/current/active/files/retrodeck/components"
+    for name, manifest in {
+        "melonds": {"melonds": {"bios": [{"filename": "bios7.bin", "md5": "00", "system": "nds"}]}},
+        "ppsspp": {"ppsspp": {"preset_actions": {"bios": {"filename": "ppge_atlas.zim", "system": "psp"}}}},
+        "retroarch": {"retroarch": {"cores": {"a": {"bios": [{"filename": "gba_bios.bin", "system": "gba"}]},
+                                              "b": {"bios": [{"filename": "gba_bios.bin", "system": "gba"}]}}}},
+    }.items():
+        touch(components / name / "component_manifest.json", json.dumps(manifest).encode())
+    entries = bios.load_entries(settings)
+    assert sorted(e.filename for e in entries) == ["bios7.bin", "gba_bios.bin", "ppge_atlas.zim"]

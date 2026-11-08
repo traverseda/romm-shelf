@@ -1,0 +1,123 @@
+# PCSX2 for every game: controllers from Steam Input only, in Steam's order (player 1 is Steam's
+# first controller), and saves where the pcsx2 save adapter looks (design.md § Controller rule and
+# § Bundled emulators, PCSX2). Does nothing until PCSX2 has been set up by its first game.
+#
+# ansible.builtin only. PCSX2 keeps its controller mapping in the same INI as everything else, and
+# lineinfile can't tell one [PadN] section from another, so each pad's whole section is replaced
+# (the controller mapping is ours; the rest of the file is only changed key by key).
+- name: PCSX2 settings
+  hosts: all  # a scoped patch runs for its targets, one host each
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/pcsx2/mapping.yml"
+  vars:
+    x_scope: emulator
+    x_emulators: [pcsx2]
+    x_settings:
+      memory_card:
+        title: Memory card
+        description: >-
+          The folder card in saves/ps2/pcsx2/memcards, one folder per save; that is what syncs.
+          The patch makes it if it is missing.
+        default: Mcd001_converted.ps2
+      resolution:
+        title: Internal resolution
+        description: Native is the PS2's 480 lines. The Deck's screen is 800 lines; 2x is sharper and heavier.
+        choices:
+          "1": Native
+          "2": 2x
+          "3": 3x
+          "4": 4x
+        default: "1"
+      aspect:
+        title: Aspect ratio
+        choices:
+          auto: Auto
+          wide: "16:9"
+          standard: "4:3"
+          stretch: Stretch to the screen
+        default: auto
+    external: "{{ pcsx2 == 'external' }}"
+    # The folder holding PCSX2.ini, from the central `settings` patch.
+    target: "{{ pcsx2_local_config | expanduser if external else pcsx2_config }}"
+    config: "{{ target }}/PCSX2.ini"
+    card: "{{ saves }}/ps2/pcsx2/memcards/{{ memory_card }}"
+    settings:
+      - {section: UI, key: StartFullscreen, value: "true"}
+      - {section: UI, key: ConfirmShutdown, value: "false"}
+      - {section: UI, key: PauseOnFocusLoss, value: "false"}
+      # The adapter's cards: one folder per save, under the layout's saves.
+      - {section: Folders, key: MemoryCards, value: "{{ saves }}/ps2/pcsx2/memcards"}
+      - {section: Folders, key: Bios, value: "{{ bios }}"}
+      - {section: Folders, key: Savestates, value: "{{ states }}/ps2/pcsx2"}
+      - {section: MemoryCards, key: Slot1_Enable, value: "true"}
+      - {section: MemoryCards, key: Slot1_Filename, value: "{{ memory_card }}"}
+      - {section: MemoryCards, key: Slot2_Enable, value: "false"}
+      # Folder cards filter each save to its own game (the same switch RetroDECK uses).
+      - {section: EmuCore, key: McdFolderAutoManage, value: "true"}
+      - {section: EmuCore/GS, key: upscale_multiplier, value: "{{ resolution }}"}
+      - {section: EmuCore/GS, key: AspectRatio, value: "{{ aspect_ratios[aspect] }}"}
+  tasks:
+    - name: Find PCSX2's config
+      ansible.builtin.stat:
+        path: "{{ config }}"
+      register: config_file
+
+    - name: Make the memory card folder
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: ["{{ saves }}/ps2/pcsx2/memcards", "{{ card }}", "{{ states }}/ps2/pcsx2"]
+      when: config_file.stat.exists
+
+    - name: Find the folder card's superblock
+      ansible.builtin.stat:
+        path: "{{ card }}/_pcsx2_superblock"
+      register: superblock
+      when: config_file.stat.exists
+
+    # An empty superblock is all PCSX2 needs; it formats the card on first open.
+    - name: Make the folder card
+      ansible.builtin.copy:
+        dest: "{{ card }}/_pcsx2_superblock"
+        content: ""
+        force: false
+        mode: "0644"
+      when: config_file.stat.exists and not superblock.stat.exists
+
+    - name: Config sections
+      ansible.builtin.lineinfile:
+        path: "{{ config }}"
+        line: "[{{ item }}]"
+        create: true
+        mode: "0644"
+      loop: [UI, Folders, EmuCore, MemoryCards, "EmuCore/GS", Pad1, Pad2, Pad3, Pad4]
+      when: config_file.stat.exists
+
+    - name: Config settings
+      ansible.builtin.lineinfile:
+        path: "{{ config }}"
+        regexp: '^{{ item.key }}\s*='
+        line: "{{ item.key }} = {{ item.value }}"
+        insertafter: '^\[{{ item.section }}\]$'
+        create: true
+        mode: "0644"
+      loop: "{{ settings }}"
+      loop_control:
+        label: "{{ item.section }} {{ item.key }}"
+      when: config_file.stat.exists
+
+    # The whole pad section, so no key can land in the wrong player's section.
+    - name: Controllers, players 1-4
+      ansible.builtin.replace:
+        path: "{{ config }}"
+        regexp: '(?ms)^\[Pad{{ item }}\]\n.*?(?=^\[|\Z)'
+        replace: |
+          [Pad{{ item }}]
+          Type = DualShock2
+          {% for key, control in bindings.items() %}
+          {{ key }} = SDL-{{ item - 1 }}/{{ control }}
+          {% endfor %}
+      loop: [1, 2, 3, 4]
+      when: config_file.stat.exists

@@ -1,0 +1,44 @@
+# Runs romm-shelf's background service at login: it syncs installed games' saves when it starts,
+# every 15 minutes and before the machine sleeps, so a game played offline syncs once the network
+# is back (design.md § Patches).
+- name: Background save sync
+  hosts: localhost
+  gather_facts: false
+  vars:
+    unit_dir: "{{ lookup('env', 'XDG_CONFIG_HOME') | default(lookup('env', 'HOME') ~ '/.config', true) }}/systemd/user"
+  tasks:
+    - name: The romm-shelf user unit
+      ansible.builtin.copy:
+        dest: "{{ unit_dir }}/romm-shelf.service"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=romm-shelf: sync saves with RomM in the background
+
+          [Service]
+          ExecStart={{ romm_shelf }} serve
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=default.target
+      notify: Restart romm-shelf
+
+    - name: Running now and at login
+      ansible.builtin.systemd_service:
+        name: romm-shelf.service
+        scope: user
+        daemon_reload: true
+        enabled: true
+        state: started
+      # Before the unit file exists, check mode can't find it; the task above already shows the change.
+      ignore_errors: "{{ ansible_check_mode }}"
+
+  handlers:
+    - name: Restart romm-shelf
+      ansible.builtin.systemd_service:
+        name: romm-shelf.service
+        scope: user
+        daemon_reload: true
+        state: restarted
+      ignore_errors: "{{ ansible_check_mode }}"

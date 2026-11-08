@@ -1,14 +1,19 @@
-"""Eden, a Nintendo Switch emulator (a Yuzu fork), as an external emulator.
+"""Eden, a Nintendo Switch emulator (a Yuzu fork): the bundled emulator, the external one, and the
+save adapter.
 
-ES-DE already has an EDEN find rule and a commented-out Eden command for the
-switch system, so only the location and the command are ours. The folder links
-follow RetroDECK's old Ponzu setup for Yuzu, which Eden shares a layout with:
-keys and firmware under bios/switch, NAND and SD card (the saves) under
-saves/switch/eden. EdenAdapter syncs the saves.
+As an external emulator, RetroDECK (0.10.10b and later) has an external components folder and lists
+"Eden (Standalone)" for the switch system, so the files, the find rule and the choice of default are
+ours. The folder links follow RetroDECK's old Ponzu setup for Yuzu, which Eden shares a layout with:
+keys and firmware under bios/switch, NAND and SD card (the saves) under saves/switch/eden.
+
+As a bundled emulator (`EdenEmulator`), Eden runs from the bundle and its `eden` patch keeps the
+same layout: NAND and SD card under saves/switch/eden, keys and firmware under bios/switch. In both
+cases EdenAdapter syncs the saves.
 """
 
 import re
 import struct
+from dataclasses import dataclass
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -17,6 +22,7 @@ from romm_shelf.adapters import DiscReader, LocalSave
 from romm_shelf.external import External
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom
+from romm_shelf.native import RunPlan
 from romm_shelf.romm import Rom
 
 EDEN = External(
@@ -25,7 +31,7 @@ EDEN = External(
     pattern="Eden-Linux-*.appimage",
     es_emulator="EDEN",
     es_label="Eden (Standalone)",
-    es_args="-f -g %ROM%",
+    args=("-f",),  # full screen; RetroDECK's command passes only the ROM, which Eden boots
     links=(
         ("eden/keys", "$bios_path/switch/keys"),
         ("eden/nand", "$saves_path/switch/eden/nand"),
@@ -42,6 +48,27 @@ EDEN = External(
         ("eden/qt-config.ini", "sdmc_directory", "$saves_path/switch/eden/sdmc"),
     ),
     process="eden",
+    # Gyro aiming: player 1's motion from the gyro patch's DSU server. A key whose
+    # \default is true is read as Eden's default whatever its value, so both are set.
+    motion=(
+        ("eden/qt-config.ini", "enable_udp_controller", "true", "false"),
+        ("eden/qt-config.ini", "enable_udp_controller\\default", "false", "true"),
+        ("eden/qt-config.ini", "udp_input_servers", "127.0.0.1:26760", None),
+        ("eden/qt-config.ini", "player_0_motionleft",
+         '"motion:0,pad:0,port:26760,guid:0000000000000000000000007f000001,engine:cemuhookudp"', None),
+        ("eden/qt-config.ini", "player_0_motionleft\\default", "false", None),
+    ),
+    # CPU Accurate (1; Eden's default is Auto, 0) and GPU Medium (1; its default on desktop,
+    # and what a config carried over from Yuzu can have as Low, 0). \default as for motion
+    # above. Removing goes back to Eden's own defaults. The numbers are v0.2.1's: Eden's
+    # master has dropped Medium, making 1 High, so check them against the boot log
+    # (Renderer.gpu_accuracy) when uploading a newer AppImage.
+    accuracy=(
+        ("eden/qt-config.ini", "cpu_accuracy", "1", "0"),
+        ("eden/qt-config.ini", "cpu_accuracy\\default", "false", "true"),
+        ("eden/qt-config.ini", "gpu_accuracy", "1", "1"),
+        ("eden/qt-config.ini", "gpu_accuracy\\default", "false", "true"),
+    ),
 )
 
 
@@ -220,3 +247,58 @@ class EdenAdapter:
     def target_path(self, rom: LocalRom, layout: RetroDeckLayout, kind: str, file_name: str,
                     slot: str | None = None) -> Path | None:
         return None
+
+
+# The bundled emulator (design.md § Bundled emulators), in the romm_shelf.emulators entry-point
+# group. packaging/emulators.nix bundles it as eden/: bin/eden, lib and default/qt-config.ini.
+
+LAUNCHABLE = (".nsp", ".xci", ".nca", ".nro", ".kip", ".kipx")
+NAND_ROOT = "switch/eden/nand"
+SDMC_ROOT = "switch/eden/sdmc"
+
+
+def user_dir() -> Path:
+    """Eden's config and data folder. XDG_CONFIG_HOME and XDG_DATA_HOME point at its parent;
+    Eden appends `eden/`. The NAND and SD card still live in the save layout (the `eden` patch)."""
+    from romm_shelf.emulators import emulator_home
+    return emulator_home() / "eden"
+
+
+@dataclass(frozen=True)
+class EdenEmulator:
+    """Standalone Eden, for Nintendo Switch games."""
+
+    name: str = "eden"
+    systems: tuple[str, ...] = ("switch",)
+    patches: tuple[str, ...] = ("eden",)
+    """Run on top of the default when Eden is first set up (design.md § Patches)."""
+
+    def run_plan(self, rom: LocalRom, layout: RetroDeckLayout, bundle: Path, runtime: Path) -> RunPlan:
+        from romm_shelf.emulators import content, local_program, steam_overlay_libs
+        from romm_shelf.patches import SETTINGS_PATCH, values
+        chosen = values(SETTINGS_PATCH)
+        game = content(rom, LAUNCHABLE)
+        args = ("-f", str(game))
+        if chosen.get("eden") == "external":
+            program, extra = local_program(chosen, "eden_command", "eden")
+            return RunPlan(program, (*extra, *args), {}, rom.path.parent, seed={})
+        eden = bundle / "eden"
+        program = eden / "bin/eden"
+        if not program.exists():
+            raise FileNotFoundError(f"{self.name}: {program} isn't in the bundle")
+        home = user_dir()
+        config = home / "qt-config.ini"
+        nand, sdmc = layout.saves / NAND_ROOT, layout.saves / SDMC_ROOT
+        seed = {} if config.exists() else {config: (eden / "default/qt-config.ini").read_bytes()}
+        env = {"XDG_CONFIG_HOME": str(home.parent), "XDG_DATA_HOME": str(home.parent),
+               "XDG_CACHE_HOME": str(home.parent), **steam_overlay_libs(eden)}
+        return RunPlan(program, args, env, rom.path.parent,
+                       seed=seed,
+                       links={
+                           home / "keys": layout.bios / "switch/keys",
+                           nand / "system/Contents/registered": layout.bios / "switch/firmware/registered",
+                       },
+                       dirs=(nand, sdmc), patches=self.patches if seed else ())
+
+
+EDEN_EMULATOR = EdenEmulator()

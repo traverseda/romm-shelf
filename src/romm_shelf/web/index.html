@@ -7,41 +7,152 @@
   <link rel="stylesheet" href="/vendor/quasar.prod.css">
   <style>
     body { background: #12141a; color: #e8e8ee; }
-    [data-nav]:focus { outline: 4px solid #7cc4ff; outline-offset: 3px; }
-    .tabs { display: flex; gap: 8px; padding: 12px 16px; overflow-x: auto; scrollbar-width: none;
-            position: sticky; top: 0; z-index: 10; background: #12141a; }
+    /* The focus ring is a box-shadow, not an outline: Quasar puts .no-outline (outline: 0 !important)
+       on every q-btn, so an outline ring never showed on buttons. The dark gap keeps the blue ring
+       apart from a blue button's own fill. */
+    [data-nav]:focus { outline: none; box-shadow: 0 0 0 3px #0c0d11, 0 0 0 7px #7cc4ff; }
+    .top { position: sticky; top: 0; z-index: 10; background: #12141a; box-shadow: 0 6px 12px -6px #0008; }
+    .tabs { display: flex; gap: 8px; padding: 12px 16px 8px; overflow-x: auto; scrollbar-width: none; }
     .tab { padding: 8px 16px; border-radius: 20px; background: #232733; white-space: nowrap; cursor: pointer; }
     .tab.active { background: #3b6fb6; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; padding: 8px 16px 48px; }
+    .tab.empty { opacity: .45; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 16px 8px; }
+    .search { flex: 1 1 220px; max-width: 420px; display: flex; align-items: center; gap: 8px;
+              background: #232733; border-radius: 20px; padding: 0 14px; }
+    .search input { flex: 1; min-width: 0; background: none; border: 0; color: inherit; font: inherit;
+                    padding: 8px 0; outline: none; }
+    .search:focus-within { box-shadow: 0 0 0 3px #0c0d11, 0 0 0 7px #7cc4ff; }
+    .search input:focus { outline: none; }
+    .chip { padding: 6px 14px; border-radius: 16px; background: #232733; white-space: nowrap; cursor: pointer;
+            display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
+    .chip.active { background: #3b6fb6; }
+    .setting { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 6px 16px 6px 56px; }
+    .setting .label { flex: 1 1 240px; min-width: 0; }
+    .setting .search { flex: 1 1 260px; }
+    .chip .n { color: #9aa3b5; font-size: 12px; }
+    .chip.active .n { color: #d6e4ff; }
+    /* Steam's letter jump: the letter shows big mid-screen for a moment, over one continuous list. */
+    .jump-letter { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 30;
+                   width: 160px; height: 160px; border-radius: 24px; background: #000c; color: #fff;
+                   display: flex; align-items: center; justify-content: center; font-size: 96px; font-weight: 700;
+                   pointer-events: none; }
+    .fade-leave-active { transition: opacity .3s; }
+    .fade-leave-to { opacity: 0; }
+    .card { content-visibility: auto; contain-intrinsic-size: auto 260px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; padding: 8px 16px 64px; }
     .card { background: #1c1f28; border-radius: 10px; overflow: hidden; cursor: pointer; }
-    .cover { aspect-ratio: 3 / 4; width: 100%; object-fit: cover; background: #2a2e3a; display: block; }
+    .cover-wrap { position: relative; aspect-ratio: 3 / 4; background: #2a2e3a; color: #6b7385;
+                  display: flex; align-items: center; justify-content: center; font-size: 13px; }
+    /* Box art comes in every shape (SNES and N64 wide, Switch tall): letterbox it, never crop it. */
+    .cover { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block;
+             opacity: 0; transition: opacity .25s; }
+    .cover.loaded { opacity: 1; }
     .title { padding: 6px 8px; font-size: 13px; line-height: 1.3; height: 3.2em; overflow: hidden; }
+    .title .plat { color: #8a93a5; font-size: 11px; }
     .badge { position: absolute; top: 6px; right: 6px; }
+    .badge-left { position: absolute; top: 6px; left: 6px; }
+    .more { display: flex; align-items: center; justify-content: center; min-height: 120px;
+            background: #1c1f28; border-radius: 10px; cursor: pointer; color: #9aa3b5; }
+    .empty-state { padding: 48px 16px; text-align: center; color: #9aa3b5; }
+    .sync-row { display: flex; gap: 8px; font-size: 13px; padding: 2px 0; }
+    .way-up { color: #ffb74d; } .way-down { color: #7cc4ff; } .way-conflict { color: #ff7c7c; }
     .hint { position: fixed; bottom: 0; left: 0; right: 0; padding: 6px 16px; background: #0c0d11; font-size: 13px; color: #9aa; }
     .detail { background: #1c1f28; color: #e8e8ee; width: 720px; max-width: 95vw; }
+    /* A flex row stretches its items to the text's height: the cover keeps its own shape instead. */
+    .detail-cover { width: 160px; height: auto; max-height: 260px; object-fit: contain; align-self: flex-start;
+                    border-radius: 8px; }
+    .extras { background: #12141a; color: #e8e8ee; display: flex; flex-direction: column; }
+    .extras-tabs { display: flex; gap: 8px; padding: 12px 16px; overflow-x: auto; scrollbar-width: none;
+                   align-items: center; }
+    .extras-view { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column;
+                   align-items: center; gap: 12px; padding: 12px; }
+    .extras-view:focus { box-shadow: inset 0 0 0 3px #7cc4ff; }
+    .extras-view canvas { background: #fff; max-width: 100%; box-shadow: 0 2px 12px #0008; }
+    .manual-pages { display: contents; }
+    .extras-view .full { max-width: 100%; max-height: 100%; object-fit: contain; margin: auto; }
     .bios { padding: 8px 16px 96px; max-width: 1000px; }
     .strip { position: fixed; bottom: 30px; left: 0; right: 0; padding: 6px 16px; background: #1a2333;
              font-size: 13px; z-index: 20; }
     .bios-row { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-radius: 8px;
                 background: #1c1f28; margin-bottom: 4px; cursor: pointer; }
     .bios-badge { min-width: 110px; justify-content: center; }
+    /* One card per patch: header row, then everything about it lined up under the title. */
+    .patch { background: #1c1f28; border-radius: 8px; margin-bottom: 12px; padding-bottom: 4px; }
+    .patch > .bios-row { background: none; margin: 0; }
+    .patch-body { padding: 0 12px 8px 134px; display: flex; flex-direction: column; gap: 8px; }
+    .patch-body .setting { padding: 0; }
+    .patch-body .cli { font-size: 12px; font-family: monospace; color: #8a93a5; }
+    @media (max-width: 600px) { .patch-body { padding-left: 12px; } }
+    .game-settings .patch-body { padding-left: 12px; }
+    /* Big, with the title and Close fixed and the settings scrolling between them. Quasar caps a
+       dialog at 560px wide, hence the more specific selector. 100% is the dialog's area inside
+       Quasar's 24px padding, so on a phone it fills the screen less that padding. */
+    .q-dialog__inner > .game-settings { width: 1100px; max-width: 100%; height: 90vh; max-height: 100%;
+                                       display: flex; flex-direction: column; overflow: hidden; }
+    .game-settings > .game-settings-body { flex: 1 1 auto; overflow-y: auto; }
+    .patch-result { border-radius: 6px; border-left: 4px solid; }
+    .patch-ok { border-color: var(--q-positive); background: rgba(33, 186, 69, .12); }
+    .patch-failed { border-color: var(--q-negative); background: rgba(193, 0, 21, .15); }
+    .patch-blocked { border-color: var(--q-warning); background: rgba(242, 192, 55, .12); }
   </style>
 </head>
 <body>
 <div id="app">
-  <div class="tabs" data-nav-group="tabs" data-nav-down="grid">
-    <div v-for="p in platforms" :key="p.slug" class="tab" :class="{active: p.slug === platform}"
-         tabindex="0" data-nav @click="platform = p.slug">
-      {{ p.slug }} <span class="text-grey-5">{{ p.on_device }}/{{ p.total }}</span>
+  <div class="top">
+    <div class="tabs" data-nav-group="tabs" data-nav-down="toolbar,grid">
+      <template v-if="loading && !lib.roms.length">
+        <q-skeleton v-for="i in 8" :key="i" type="QChip" width="90px" style="border-radius:20px"></q-skeleton>
+      </template>
+      <template v-else>
+        <div class="tab" :class="{active: platform === ALL}" tabindex="0" data-nav @click="platform = ALL">
+          All <span class="text-grey-5">{{ tabCount(null) }}</span></div>
+        <div v-for="p in platforms" :key="p.slug" class="tab" :class="{active: p.slug === platform, empty: narrowed && p.slug !== platform && !tabCount(p.slug)}"
+             tabindex="0" data-nav @click="platform = p.slug">
+          {{ p.slug }} <span class="text-grey-5">{{ narrowed ? tabCount(p.slug) : `${p.on_device}/${p.total}` }}</span>
+        </div>
+      </template>
+      <div class="tab" :class="{active: platform === ACTIVITY}" tabindex="0" data-nav @click="platform = ACTIVITY">
+        Activity <q-spinner v-if="runningJobs.length" size="14px"></q-spinner></div>
+      <div class="tab" :class="{active: platform === PATCHES}" tabindex="0" data-nav @click="platform = PATCHES">Patches</div>
+      <div class="tab" :class="{active: platform === BIOS}" tabindex="0" data-nav @click="platform = BIOS">BIOS</div>
     </div>
-    <div class="tab" :class="{active: platform === ACTIVITY}" tabindex="0" data-nav @click="platform = ACTIVITY">
-      Activity <q-spinner v-if="runningJobs.length" size="14px"></q-spinner></div>
-    <div class="tab" :class="{active: platform === PATCHES}" tabindex="0" data-nav @click="platform = PATCHES">Patches</div>
-    <div class="tab" :class="{active: platform === BIOS}" tabindex="0" data-nav @click="platform = BIOS">BIOS</div>
+
+    <template v-if="isLibrary">
+      <div class="toolbar" data-nav-group="toolbar" data-nav-up="tabs" data-nav-down="grid">
+        <label class="search">
+          <span class="text-grey-5" aria-hidden="true">⌕</span>
+          <input ref="searchBox" v-model="query" type="text" placeholder="Search games (X)" data-nav
+                 aria-label="Search games" autocomplete="off" spellcheck="false">
+          <span v-if="query" class="cursor-pointer text-grey-5" role="button" aria-label="Clear search"
+                @click.prevent="query = ''">✕</span>
+        </label>
+        <div v-for="f in FILTERS" :key="f.key" class="chip" :class="{active: filter === f.key}" tabindex="0" data-nav
+             @click="filter = f.key">
+          {{ f.label }}
+          <q-spinner v-if="f.key === 'sync' && syncLoading" size="12px"></q-spinner>
+          <span v-else-if="lib.roms.length" class="n">{{ filterCount(f.key) }}</span>
+        </div>
+        <q-space></q-space>
+        <div v-if="syncState.error" class="text-warning" style="font-size:13px">
+          Couldn't check saves: {{ syncState.error }}</div>
+        <div v-else-if="syncState.checked && !syncLoading" class="text-grey-6" style="font-size:12px">
+          saves checked {{ ago(syncState.checked) }}</div>
+        <q-btn v-if="filter === 'sync' && syncIds.length" color="primary" unelevated dense no-caps class="q-px-md" data-nav
+               :loading="syncBusy" :label="`Sync ${syncIds.length} game${syncIds.length === 1 ? '' : 's'}`"
+               @click="syncNow(syncIds)"></q-btn>
+      </div>
+    </template>
+    <q-linear-progress v-if="loading && lib.roms.length" indeterminate size="2px" color="primary"></q-linear-progress>
   </div>
 
-  <div v-if="loading" class="q-pa-xl text-center"><q-spinner size="48px"></q-spinner><div>Loading library…</div></div>
-  <div v-else-if="error" class="q-pa-xl text-negative">{{ error }}</div>
+  <div v-if="loading && !lib.roms.length && isLibrary" class="grid">
+    <div v-for="i in 18" :key="i" class="card">
+      <q-skeleton square style="aspect-ratio:3/4;height:auto"></q-skeleton>
+      <div class="title"><q-skeleton type="text"></q-skeleton><q-skeleton type="text" width="60%"></q-skeleton></div>
+    </div>
+  </div>
+  <div v-else-if="error" class="q-pa-xl text-negative">
+    {{ error }} <q-btn flat color="primary" label="Try again" data-nav @click="load(true)"></q-btn></div>
   <div v-else-if="platform === ACTIVITY" class="bios" data-nav-group="grid" data-nav-up="tabs">
     <div v-if="!activity.length" class="q-pa-md text-grey-5">
       Nothing yet. Installs, syncs (game start/end, sleep, uninstall), patches and BIOS downloads show up here.
@@ -59,37 +170,82 @@
       </div>
       <div v-if="openJob[j.id]" class="q-px-md q-pb-sm text-grey-5" style="font-size:12px;font-family:monospace">
         <div v-if="!j.log.length">No files changed.</div>
-        <div v-for="(l, i) in j.log" :key="i" :class="{ 'text-negative': l.error }">
-          {{ l.error ? "FAIL" : "ok" }} {{ l.step }}<span v-if="l.error">: {{ l.error }}</span></div>
+        <div v-for="(l, i) in j.log" :key="i" :class="{ 'text-negative': l.error, 'text-grey-7': l.skipped }">
+          {{ l.error ? "FAIL" : l.skipped ? "not run" : "ok" }} {{ l.step }}<span v-if="l.error">: {{ l.error }}</span></div>
         <div v-if="j.error" class="text-negative">{{ j.error }}</div>
       </div>
     </div>
   </div>
   <div v-else-if="platform === PATCHES" class="bios" data-nav-group="grid" data-nav-up="tabs">
-    <div v-if="patchesLoading" class="q-pa-xl text-center"><q-spinner size="48px"></q-spinner><div>Checking patches…</div></div>
+    <div v-if="patchesLoading" class="q-pa-xl text-center"><q-spinner size="48px"></q-spinner><div>Loading patches…</div></div>
     <div v-if="patchMessage" class="q-pa-sm text-grey-4">{{ patchMessage }}</div>
-    <div v-for="p in patchList" :key="p.name" class="q-mb-md">
+    <div v-for="p in patchList" :key="pkey(p)" class="patch">
       <div class="bios-row" style="cursor:default">
         <q-badge :color="patchBadge(p).color" class="bios-badge">{{ patchBadge(p).label }}</q-badge>
         <div class="col">
-          <div>{{ p.title }} <span class="text-grey-5">· {{ p.name }}</span></div>
+          <div>{{ p.title }} <span class="text-grey-5">· {{ p.name }}{{ forEmulator(p) ? ` · for ${forEmulator(p)}` : "" }}{{ ({romm: " · from RomM", game: " · this game's own, from RomM", user: " · yours"})[p.origin] || "" }}</span></div>
           <div class="text-grey-6" style="font-size:12px">{{ p.description }}</div>
         </div>
-        <q-spinner v-if="patchBusy === p.name"></q-spinner>
+        <q-spinner v-if="patchBusy === pkey(p) || p.state === 'checking'"></q-spinner>
         <template v-else>
-          <q-btn v-if="p.state === 'not-applied' || p.state === 'update'" color="primary" unelevated dense class="q-px-md"
-                 data-nav :label="p.state === 'update' ? 'Update' : 'Apply'" @click="patchAct(p, 'apply')"></q-btn>
-          <q-btn v-if="p.removable.length && p.name !== 'hooks'" unelevated dense class="q-px-md" data-nav
-                 :color="confirmPatch === p.name ? 'negative' : 'grey-8'"
-                 :label="confirmPatch === p.name ? 'Press again to remove' : 'Remove'" @click="patchAct(p, 'remove')"></q-btn>
+          <q-btn v-if="p.state === 'pending'" color="primary" unelevated dense class="q-px-md"
+                 data-nav label="Apply" @click="patchAct(p)"></q-btn>
         </template>
       </div>
-      <div class="q-px-md text-grey-5" style="font-size:12px;font-family:monospace">
-        <div v-if="p.error" class="text-warning">{{ p.error }}</div>
-        <div v-for="line in (p.state === 'applied' ? [] : p.plan)" :key="line">{{ line }}</div>
-        <div v-if="confirmPatch === p.name" class="text-negative">
-          <div v-for="line in p.removable" :key="line">{{ line }}</div></div>
-        <div v-if="p.state !== 'applied' && !p.error">CLI: {{ p.cli }}</div>
+      <div v-if="p.state !== 'checking'" class="patch-body">
+      <!-- The patch's own settings (x_settings in its playbook). Saving re-checks it; Apply makes the
+           change. A per-emulator entry is set for that emulator: Inherit takes the value above it. -->
+      <div v-for="s in shownSettings(p)" :key="s.key" class="setting">
+        <div class="label">
+          <div>{{ s.title }}</div>
+          <div v-if="s.description" class="text-grey-6" style="font-size:12px">{{ s.description }}</div>
+        </div>
+        <div v-if="s.type === 'choice' || s.type === 'bool'" class="row q-gutter-xs">
+          <div v-if="forEmulator(p)" class="chip" :class="{active: !s.here}" tabindex="0" data-nav
+               @click="s.here && setSetting(p, s, null)">
+            <span v-if="!s.here">✓</span>Inherit ({{ inheritLabel(s) }})</div>
+          <div v-for="[v, label] in settingChoices(s)" :key="String(v)" class="chip"
+               :class="{active: chosen(p, s, v)}" tabindex="0" data-nav
+               @click="setSetting(p, s, v)"><span v-if="chosen(p, s, v)">✓</span>{{ label }}</div>
+        </div>
+        <template v-else>
+          <label class="search">
+            <input data-nav :type="s.type === 'number' ? 'number' : 'text'"
+                   :value="forEmulator(p) && !s.here ? '' : s.value" :aria-label="s.title"
+                   :placeholder="forEmulator(p) ? `Inherit: ${inheritLabel(s)}` : ''"
+                   @change="setSetting(p, s, forEmulator(p) && $event.target.value === '' ? null : $event.target.value)">
+          </label>
+          <q-btn v-if="forEmulator(p) && s.here" flat dense no-caps label="Inherit" data-nav
+                 @click="setSetting(p, s, null)"></q-btn>
+        </template>
+        <q-spinner v-if="settingBusy === pkey(p) + '.' + s.key"></q-spinner>
+      </div>
+      <div v-if="settingError[pkey(p)]" class="q-pa-sm patch-result patch-failed">{{ settingError[pkey(p)] }}</div>
+      <div v-if="p.settings && p.settings.length" class="cli">CLI: romm-shelf patches set {{ p.name }}{{ forEmulator(p) ? ` --emulator ${forEmulator(p)}` : "" }} KEY=VALUE</div>
+      <div v-if="patchResult[pkey(p)]" class="q-pa-sm patch-result"
+           :class="patchResult[pkey(p)].ok ? 'patch-ok' : 'patch-failed'">
+        <template v-if="patchResult[pkey(p)].ok">{{ patchResult[pkey(p)].summary }}</template>
+        <template v-else>
+          <div class="text-weight-bold">{{ patchResult[pkey(p)].summary }}</div>
+          <div class="q-my-xs">{{ patchResult[pkey(p)].error }}</div>
+          <div style="font-size:12px;font-family:monospace">
+            <div v-for="(l, i) in patchResult[pkey(p)].log" :key="i"
+                 :class="{ 'text-negative': l.error, 'text-grey-6': l.skipped }">
+              {{ l.error ? "FAIL" : l.changed ? "changed" : "ok" }} {{ l.step }}</div>
+          </div>
+        </template>
+      </div>
+      <div v-if="p.error" class="q-pa-sm patch-result patch-blocked">
+        <div class="text-weight-bold">Check failed</div>
+        <div>{{ p.error }}</div>
+      </div>
+      <div v-if="p.state !== 'applied' && p.plan.length" class="text-grey-5" style="font-size:12px">
+        <div>Applying will change:</div>
+        <div style="font-family:monospace">
+          <div v-for="line in p.plan" :key="line">· {{ line }}</div>
+        </div>
+      </div>
+      <div v-if="p.state !== 'applied'" class="cli">CLI: romm-shelf patches apply {{ p.name }}{{ forEmulator(p) ? ` --emulator ${forEmulator(p)}` : "" }}</div>
       </div>
     </div>
   </div>
@@ -125,34 +281,78 @@
       </div>
     </div>
   </div>
-  <div v-else class="grid" data-nav-group="grid" data-nav-up="tabs">
-    <div v-for="r in shown" :key="r.id" class="card relative-position" tabindex="0" data-nav @click="open(r)">
-      <img v-if="r.cover" class="cover" :src="r.cover" loading="lazy" alt="">
-      <div v-else class="cover flex flex-center text-grey-6">{{ r.platform }}</div>
+  <div v-else-if="!shown.length" class="empty-state" data-nav-group="grid" data-nav-up="toolbar,tabs">
+    <template v-if="filter === 'sync' && syncLoading">
+      <q-spinner size="32px"></q-spinner><div class="q-mt-sm">Checking saves against RomM…</div></template>
+    <template v-else-if="filter === 'sync' && !query">Every save on this device is in sync.</template>
+    <template v-else>
+      <div>No games{{ query ? ` match “${query}”` : "" }}{{ platform === ALL ? "" : ` in ${platform}` }}{{ filterNote }}.</div>
+      <div class="q-mt-md q-gutter-sm">
+        <q-btn v-if="platform !== ALL && tabCount(null)" flat color="primary" no-caps data-nav
+               :label="`Show ${tabCount(null)} in all platforms`" @click="platform = ALL"></q-btn>
+        <q-btn v-if="filter !== 'all'" flat color="primary" no-caps data-nav label="Show all games" @click="filter = 'all'"></q-btn>
+        <q-btn v-if="query" flat color="primary" no-caps data-nav label="Clear search" @click="query = ''"></q-btn>
+      </div>
+    </template>
+  </div>
+  <div v-else class="grid" data-nav-group="grid" data-nav-up="toolbar,tabs" @focusin="onCardFocus">
+    <div v-for="r in shown.slice(0, limit)" :key="r.id" class="card relative-position" tabindex="0" data-nav
+         :data-letter="letterOf(r)" :data-id="r.id" @click="open(r)">
+      <div class="cover-wrap">
+        {{ r.platform }}
+        <img v-if="r.cover" class="cover" :src="r.cover" loading="lazy" decoding="async" alt=""
+             @load="$event.target.classList.add('loaded')" @error="$event.target.remove()">
+      </div>
+      <q-badge v-if="syncBadge(r)" class="badge-left" :color="syncBadge(r).color">{{ syncBadge(r).label }}</q-badge>
       <q-badge v-if="jobs[r.id]?.status === 'running'" class="badge" color="primary">{{ pct(jobs[r.id]) }}%</q-badge>
       <q-badge v-else-if="r.status === 'on-device'" class="badge" color="positive">on device</q-badge>
-      <div class="title">{{ r.name }}</div>
+      <div class="title">{{ r.name }} <span v-if="platform === ALL" class="plat">· {{ r.platform }}</span></div>
     </div>
+    <div v-if="shown.length > limit" ref="sentinel" class="more">Loading more…</div>
   </div>
+  <transition name="fade">
+    <div v-if="jumpLetter" class="jump-letter" aria-live="polite">{{ jumpLetter }}</div>
+  </transition>
 
-  <q-dialog v-model="detailOpen" @hide="restoreFocus">
+  <q-dialog v-model="detailOpen" no-esc-dismiss @hide="restoreFocus">
     <q-card v-if="detail" class="detail" data-nav-modal data-nav-group="dialog">
       <q-card-section class="row no-wrap q-gutter-md">
-        <img v-if="detail.cover" :src="detail.cover" style="width:160px;border-radius:8px" alt="">
+        <img v-if="detail.cover" class="detail-cover" :src="detail.cover" alt="">
         <div class="col">
           <div class="text-h6">{{ detail.name }}</div>
           <div class="text-grey-5">{{ detail.platform }} · {{ size(detail.size) }} · {{ detail.fs_name }}</div>
           <q-badge class="q-mt-sm" :color="detail.status === 'on-device' ? 'positive' : 'grey-8'">{{ detail.status }}</q-badge>
-          <p class="q-mt-md" style="max-height:9em;overflow:auto">{{ detail.summary }}</p>
+          <p v-if="detailLoading" class="q-mt-md"><q-skeleton type="text" v-for="i in 3" :key="i"></q-skeleton></p>
+          <p v-else class="q-mt-md" style="max-height:9em;overflow:auto">{{ detail.summary }}</p>
         </div>
       </q-card-section>
       <q-card-section>
-        <div class="text-subtitle2">On this device</div>
-        <div v-if="!detail.local_files.length" class="text-grey-6">No saves or states.</div>
-        <div v-for="f in detail.local_files" :key="f.name">
-          {{ f.kind }} <span class="text-grey-5">{{ f.slot }}</span> · {{ f.name }} · {{ when(f.modified) }}
-        </div>
-        <div class="q-mt-sm text-grey-5">On RomM: {{ detail.server_saves }} saves, {{ detail.server_states }} states</div>
+        <div class="text-subtitle2">Saves</div>
+        <div v-if="syncLoading" class="text-grey-5"><q-spinner size="14px"></q-spinner> Checking against RomM…</div>
+        <div v-else-if="syncState.error" class="text-warning">Couldn't check: {{ syncState.error }}</div>
+        <template v-else-if="syncState.roms[detail.id]">
+          <div class="row items-center q-mb-xs">
+            <div class="col" :class="`way-${syncState.roms[detail.id].direction === 'down' ? 'down' : syncState.roms[detail.id].direction === 'conflict' ? 'conflict' : 'up'}`">
+              Out of sync: {{ syncState.roms[detail.id].steps.length }} file{{ syncState.roms[detail.id].steps.length === 1 ? "" : "s" }}</div>
+            <q-btn color="primary" unelevated dense no-caps class="q-px-md" label="Sync now" data-nav :loading="syncBusy"
+                   @click="syncNow([detail.id])"></q-btn>
+          </div>
+          <div v-for="(s, i) in syncState.roms[detail.id].steps" :key="i" class="sync-row">
+            <span :class="`way-${s.direction === 'both' ? 'up' : s.direction}`" style="min-width:90px">{{ s.action }}</span>
+            <span class="col">{{ s.file }} <span class="text-grey-6">({{ s.reason }})</span></span>
+          </div>
+        </template>
+        <div v-else-if="syncState.checked && detail.status === 'on-device'" class="text-positive">In sync with RomM.</div>
+        <div v-else-if="syncState.checked" class="text-grey-6">Nothing to sync until it's installed.</div>
+        <div class="text-subtitle2 q-mt-md">On this device</div>
+        <div v-if="detailLoading" class="text-grey-5"><q-spinner size="14px"></q-spinner> Reading saves…</div>
+        <template v-else>
+          <div v-if="!detail.local_files.length" class="text-grey-6">No saves or states.</div>
+          <div v-for="f in detail.local_files" :key="f.name">
+            {{ f.kind }} <span class="text-grey-5">{{ f.slot }}</span> · {{ f.name }} · {{ when(f.modified) }}
+          </div>
+          <div class="q-mt-sm text-grey-5">On RomM: {{ detail.server_saves }} saves, {{ detail.server_states }} states</div>
+        </template>
       </q-card-section>
       <q-card-section v-if="job">
         <q-linear-progress :value="job.total ? job.done / job.total : 0" size="10px" rounded
@@ -165,13 +365,139 @@
       </q-card-section>
       <q-card-section v-if="message" class="text-grey-4">{{ message }}</q-card-section>
       <q-card-actions align="right" class="q-gutter-sm">
+        <q-btn v-if="detail.extras?.length" color="grey-8" unelevated :label="extrasLabel(detail.extras)" data-nav
+               ref="extrasButton" @click="openExtras()"></q-btn>
+        <q-btn v-if="detail.status === 'on-device'" color="primary" unelevated label="Settings" data-nav
+               ref="settingsButton" @click="openGameSettings"></q-btn>
+        <q-btn v-if="detail.status === 'on-device'" color="positive" unelevated label="Play" data-nav data-nav-default
+               :loading="!!playJob" @click="playNow"></q-btn>
         <q-btn v-if="detail.status === 'remote' && job?.status !== 'running'" color="primary" unelevated
                :label="`Install (${size(detail.size)})`" data-nav data-nav-default @click="install"></q-btn>
         <q-btn v-if="detail.status === 'on-device'" :color="confirmRemove ? 'negative' : 'grey-8'" unelevated
                :label="confirmRemove ? 'Press again to uninstall' : 'Uninstall'" :loading="busy" data-nav
                @click="uninstall"></q-btn>
-        <q-btn flat label="Close (B)" data-nav :data-nav-default="detail.status === 'on-device' || job?.status === 'running' ? '' : null"
+        <q-btn flat label="Close (B)" data-nav :data-nav-default="job?.status === 'running' ? '' : null"
                @click="detailOpen = false"></q-btn>
+      </q-card-actions>
+    </q-card>
+  </q-dialog>
+
+
+  <!-- Extras: the game's manual, screenshots and video, read from RomM through the daemon
+       (`romm-shelf extras`). Up/Down scroll, LT/RT page, LB/RB or the buttons switch, B closes. -->
+  <q-dialog v-model="extrasOpen" maximized no-esc-dismiss @hide="closeExtras">
+    <q-card class="extras" data-nav-modal data-nav-group="extras">
+      <div class="extras-tabs" data-nav-group="extras-tabs" data-nav-down="extras-view">
+        <div class="text-subtitle1 q-mr-sm">{{ detail?.name }}</div>
+        <q-btn v-for="e in detail?.extras || []" :key="e.name" no-caps unelevated data-nav
+               :color="extra?.name === e.name ? 'primary' : 'grey-9'" :label="extraLabel(e)"
+               :data-nav-default="extra?.name === e.name ? '' : null" @click="showExtra(e)"></q-btn>
+        <q-space></q-space>
+        <span v-if="extraStatus" class="text-grey-5 q-mr-sm">{{ extraStatus }}</span>
+        <q-btn flat label="Close (B)" data-nav @click="extrasOpen = false"></q-btn>
+      </div>
+      <div ref="extrasView" class="extras-view" tabindex="0" data-nav data-nav-scroll
+           data-nav-group="extras-view" data-nav-up="extras-tabs" @click="toggleVideo">
+        <img v-if="extra?.kind === 'screenshot'" class="full" :src="extra.url" alt="">
+        <video v-else-if="extra?.kind === 'video'" ref="extrasVideo" class="full" :src="extra.url" controls autoplay></video>
+        <div v-show="extra?.kind === 'manual'" ref="manualPages" class="manual-pages"></div>
+      </div>
+    </q-card>
+  </q-dialog>
+
+  <!-- Per game settings (design.md § Patches, Per game): game-scoped patch settings, checked
+       for this game only. Saving writes the YAML; Apply makes the change. -->
+  <q-dialog v-model="gameSettingsOpen" no-esc-dismiss @hide="closeGameSettings">
+    <q-card class="detail game-settings" data-nav-modal data-nav-group="game-settings">
+      <q-card-section>
+        <div class="text-h6">Settings for {{ detail?.name }}</div>
+        <div class="text-grey-5" style="font-size:12px">
+          Nothing changes until you press Apply. Inherit keeps the setting every game gets, set on the Patches tab.
+        </div>
+      </q-card-section>
+      <q-card-section v-if="gamePatchesLoading" class="text-center game-settings-body">
+        <q-spinner size="32px"></q-spinner><div class="q-mt-sm text-grey-5">Loading settings…</div>
+      </q-card-section>
+      <q-card-section v-else class="game-settings-body">
+        <div v-if="gamePatchesMessage" class="q-pa-sm patch-result patch-failed">{{ gamePatchesMessage }}</div>
+        <div v-if="!gamePatches.length && !gamePatchesMessage" class="text-grey-6">
+          No per-game settings for this game.
+        </div>
+        <div v-for="p in gamePatches" :key="p.name" class="patch">
+          <div class="bios-row" style="cursor:default">
+            <q-badge :color="patchBadge(p).color" class="bios-badge">{{ patchBadge(p).label }}</q-badge>
+            <div class="col">
+              <!-- The playbook's header comment is written for whoever edits the patch; here each
+                   setting's own description says what it does. -->
+              <div>{{ p.title }} <span class="text-grey-5">{{ ({romm: "· from RomM", game: "· this game's own, from RomM", user: "· yours"})[p.origin] || "" }}</span></div>
+            </div>
+            <q-spinner v-if="patchBusy === p.name || p.state === 'checking'"></q-spinner>
+            <q-btn v-else-if="p.state === 'pending'" color="primary" unelevated dense class="q-px-md"
+                   data-nav label="Apply" @click="patchAct(p)"></q-btn>
+          </div>
+          <div v-if="p.state !== 'checking'" class="patch-body">
+            <div v-for="s in shownSettings(p)" :key="s.key" class="setting">
+              <div class="label">
+                <div>{{ s.title }}</div>
+                <div v-if="s.description" class="text-grey-6" style="font-size:12px">{{ s.description }}</div>
+              </div>
+              <!-- Inherit is a value like the others: chosen, the setting is unset at this level. -->
+              <div v-if="s.type === 'choice' || s.type === 'bool'" class="row q-gutter-xs">
+                <div class="chip" :class="{active: !s.here}" tabindex="0" data-nav
+                     @click="s.here && setSetting(p, s, null)">
+                  <span v-if="!s.here">✓</span>Inherit ({{ inheritLabel(s) }})</div>
+                <template v-if="s.type === 'choice'">
+                  <div v-for="(label, v) in s.choices" :key="v" class="chip"
+                       :class="{active: s.here && s.value === v}" tabindex="0" data-nav
+                       @click="setSetting(p, s, v)"><span v-if="s.here && s.value === v">✓</span>{{ label }}</div>
+                </template>
+                <template v-else>
+                  <div v-for="v in [true, false]" :key="String(v)" class="chip"
+                       :class="{active: s.here && s.value === v}" tabindex="0" data-nav
+                       @click="setSetting(p, s, v)"><span v-if="s.here && s.value === v">✓</span>{{ v ? "On" : "Off" }}</div>
+                </template>
+              </div>
+              <template v-else>
+                <label class="search">
+                  <input data-nav :type="s.type === 'number' ? 'number' : 'text'" :value="s.here ? s.value : ''"
+                         :placeholder="`Inherit: ${inheritLabel(s)}`" :aria-label="s.title"
+                         @change="setSetting(p, s, $event.target.value === '' ? null : $event.target.value)">
+                </label>
+                <q-btn v-if="s.here" flat dense no-caps label="Inherit" data-nav
+                       @click="setSetting(p, s, null)"></q-btn>
+              </template>
+              <q-spinner v-if="settingBusy === p.name + '.' + s.key"></q-spinner>
+            </div>
+            <div v-if="settingError[p.name]" class="q-pa-sm patch-result patch-failed">{{ settingError[p.name] }}</div>
+            <div v-if="patchResult[p.name]" class="q-pa-sm patch-result"
+                 :class="patchResult[p.name].ok ? 'patch-ok' : 'patch-failed'">
+              <template v-if="patchResult[p.name].ok">{{ patchResult[p.name].summary }}</template>
+              <template v-else>
+                <div class="text-weight-bold">{{ patchResult[p.name].summary }}</div>
+                <div class="q-my-xs">{{ patchResult[p.name].error }}</div>
+                <div style="font-size:12px;font-family:monospace">
+                  <div v-for="(l, i) in patchResult[p.name].log" :key="i"
+                       :class="{ 'text-negative': l.error, 'text-grey-6': l.skipped }">
+                    {{ l.error ? "FAIL" : l.changed ? "changed" : "ok" }} {{ l.step }}</div>
+                </div>
+              </template>
+            </div>
+            <div v-if="p.error" class="q-pa-sm patch-result patch-blocked">
+              <div class="text-weight-bold">Check failed</div>
+              <div>{{ p.error }}</div>
+            </div>
+            <div v-if="p.state !== 'applied' && p.plan.length" class="text-grey-5" style="font-size:12px">
+              <div>Applying will change:</div>
+              <div style="font-family:monospace">
+                <div v-for="line in p.plan" :key="line">· {{ line }}</div>
+              </div>
+            </div>
+            <div class="cli">CLI: romm-shelf patches set {{ p.name }} --game {{ p.target?.game }} KEY=VALUE</div>
+          </div>
+        </div>
+      </q-card-section>
+      <q-card-actions align="right">
+        <q-btn flat label="Close (B)" data-nav @click="gameSettingsOpen = false"></q-btn>
       </q-card-actions>
     </q-card>
   </q-dialog>
@@ -183,23 +509,128 @@
       <q-linear-progress v-if="j.total" class="col" rounded size="6px" :value="j.done / j.total"></q-linear-progress>
     </div>
   </div>
-  <div class="hint">↕↔ move · A open · B back · LB/RB platform · Y refresh &nbsp;&nbsp;|&nbsp; keys: arrows · Enter · Esc · Q/E · R</div>
+  <div class="hint">↕↔ move · A open · B back · LB/RB platform · LT/RT letter · X search · Y refresh
+    &nbsp;&nbsp;|&nbsp; keys: arrows · Enter · Esc · Q/E · [ ] · / · R</div>
 </div>
 
 <script src="/vendor/vue.global.prod.js"></script>
 <script src="/vendor/quasar.umd.prod.js"></script>
 <script type="module">
 import { focusFirst } from "/nav.js";
-const { createApp, ref, computed, nextTick } = Vue;
+const { createApp, ref, computed, watch, nextTick } = Vue;
+
+// Per-viewer conveniences (last tab and filter); the page works the same without them.
+const remembered = (() => { try { return JSON.parse(localStorage.getItem("romm-shelf-view") || "{}"); } catch { return {}; } })();
+function remember(view) { try { localStorage.setItem("romm-shelf-view", JSON.stringify(view)); } catch { /* private window */ } }
+
+// Search ignores case, accents and punctuation: "pokemon" finds "Pokémon", "zelda link" finds
+// "The Legend of Zelda: A Link to the Past".
+const norm = (s) => (s || "").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const LETTERS = ["#", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"];
+const letterOf = (r) => { const c = r.key[0]; return c >= "a" && c <= "z" ? c.toUpperCase() : "#"; };
+const PAGE = 150;  // cards rendered per batch; more as the end of the list comes into view
 
 const app = createApp({
   setup() {
     const lib = ref({ platforms: [], roms: [] });
-    const platform = ref(null);
+    const platform = ref(remembered.platform ?? null);
     const loading = ref(true), error = ref(null);
-    const detail = ref(null), detailOpen = ref(false);
+    const detail = ref(null), detailOpen = ref(false), detailLoading = ref(false);
     const message = ref(null), busy = ref(false), confirmRemove = ref(false);
     let lastFocus = null;
+
+    // Library view: tab (a platform or All) → search → filter, as one A–Z list.
+    const ALL = "__all";
+    const query = ref(""), filter = ref(remembered.filter ?? "all"), limit = ref(PAGE);
+    const searchBox = ref(null);
+    const FILTERS = [
+      { key: "all", label: "All" }, { key: "device", label: "On device" },
+      { key: "remote", label: "Not installed" }, { key: "sync", label: "Out of sync" },
+    ];
+    const isLibrary = computed(() => ![ACTIVITY, PATCHES, BIOS].includes(platform.value));
+    const roms = computed(() => lib.value.roms.map((r) => ({ ...r, key: norm(r.name) })));
+    const byName = computed(() => [...roms.value].sort((a, b) => a.key.localeCompare(b.key)));
+    const searched = computed(() => {
+      const words = norm(query.value).split(" ").filter(Boolean);
+      if (!words.length) return byName.value;
+      return byName.value.filter((r) => { const hay = `${r.key} ${norm(r.fs_name)}`; return words.every((w) => hay.includes(w)); });
+    });
+    const passes = (r, f) => f === "all" || (f === "device" && r.status === "on-device")
+      || (f === "remote" && r.status !== "on-device") || (f === "sync" && !!syncState.value.roms[r.id]);
+    const narrowed = computed(() => !!query.value.trim() || filter.value !== "all");
+    const tabCount = (slug) => searched.value.filter((r) => (slug === null || r.platform === slug) && passes(r, filter.value)).length;
+    const inTab = computed(() => platform.value === ALL ? searched.value : searched.value.filter((r) => r.platform === platform.value));
+    const filterCount = (f) => inTab.value.filter((r) => passes(r, f)).length;
+    const filterNote = computed(() => ({ device: " on this device", remote: " left to install", sync: " out of sync" })[filter.value] || "");
+    const listed = computed(() => inTab.value.filter((r) => passes(r, filter.value)));
+    // One continuous A–Z list, as in Steam's library. LT/RT (or [ ]) jump to the first game of
+    // the previous/next letter, and the letter shows big mid-screen for a moment. It also shows
+    // when moving through the list crosses into a new letter.
+    const shown = listed;
+    const firstOf = computed(() => {  // letter → index of its first game in `shown`
+      const at = {}; shown.value.forEach((r, i) => { const l = letterOf(r); if (!(l in at)) at[l] = i; }); return at;
+    });
+    const jumpLetter = ref(null);
+    let jumpTimer = null, lastLetter = null;
+    function flashLetter(l) {
+      jumpLetter.value = l; clearTimeout(jumpTimer);
+      jumpTimer = setTimeout(() => { jumpLetter.value = null; }, 700);
+    }
+    function onCardFocus(e) {
+      const l = e.target.dataset?.letter;
+      if (l && lastLetter && l !== lastLetter && e.target.matches(":focus-visible")) flashLetter(l);
+      if (l) lastLetter = l;
+    }
+    async function stepLetter(step) {
+      if (!isLibrary.value || detailOpen.value || !shown.value.length) return;
+      const have = LETTERS.filter((l) => l in firstOf.value);
+      const card = document.activeElement?.closest(".card");
+      const here = card?.dataset.letter ?? letterOf(shown.value[0]);
+      const target = have[Math.min(Math.max(have.indexOf(here) + step, 0), have.length - 1)];
+      const index = firstOf.value[target];
+      if (index >= limit.value) limit.value = index + PAGE;  // render far enough to land on it
+      await nextTick();
+      const el = document.querySelector(`.card[data-id="${shown.value[index].id}"]`);
+      lastLetter = target;
+      flashLetter(target);
+      el?.focus({ preventScroll: true });
+      el?.scrollIntoView({ block: "center" });
+    }
+    // The list renders PAGE cards at a time and grows as the end comes into view.
+    const sentinel = ref(null);
+    const grow = new IntersectionObserver((seen) => {
+      if (seen.some((s) => s.isIntersecting)) limit.value += PAGE;
+    }, { rootMargin: "800px" });
+    watch(sentinel, (el, old) => { if (old) grow.unobserve(old); if (el) grow.observe(el); });
+    watch([platform, filter, query], () => { limit.value = PAGE; window.scrollTo({ top: 0 }); });
+    watch([platform, filter], () => remember({ platform: platform.value, filter: filter.value }));
+
+    // Out of sync (`romm-shelf sync --all --plan`): asked for once the library is up, again after
+    // a sync or install finishes, and on refresh. Badges appear when it answers.
+    const syncState = ref({ checked: null, error: null, roms: {} }), syncLoading = ref(false), syncBusy = ref(false);
+    const syncIds = computed(() => listed.value.filter((r) => syncState.value.roms[r.id]).map((r) => r.id));
+    async function loadSyncStatus(refresh = false) {
+      syncLoading.value = true;
+      try {
+        const res = await fetch(`/api/sync-status${refresh ? "?refresh=true" : ""}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        syncState.value = await res.json();
+      } catch (e) { syncState.value = { ...syncState.value, error: String(e) }; }
+      syncLoading.value = false;
+    }
+    async function syncNow(ids) {
+      syncBusy.value = true; message.value = null;  // then the job's id, until Activity says it ended
+      const res = await fetch(`/api/sync?${new URLSearchParams(ids.map((i) => ["rom", i]))}`, { method: "POST" });
+      const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+      if (!res.ok) { message.value = `Sync failed: ${body.detail}`; syncBusy.value = false; return; }
+      syncBusy.value = body.id;
+      watchJobs();
+    }
+    const syncBadge = (r) => {
+      const s = syncState.value.roms[r.id];
+      return s && ({ up: { color: "orange-8", label: "↑ saves" }, down: { color: "light-blue-8", label: "↓ saves" },
+                     both: { color: "orange-8", label: "↕ saves" }, conflict: { color: "negative", label: "conflict" } })[s.direction];
+    };
 
     // Activity: everything the daemon is doing or did lately, whoever started it
     // (this UI, an ES-DE hook, sleep). Polled always: fast while something runs.
@@ -219,13 +650,28 @@ const app = createApp({
         const before = Object.fromEntries(activity.value.map((j) => [j.id, j.status]));
         activity.value = await (await fetch("/api/activity")).json();
         // A finished install or sync changes badges and save lists.
-        if (activity.value.some((j) => j.status !== "running" && before[j.id] === "running")) await reload();
+        const finished = activity.value.filter((j) => j.status !== "running" && before[j.id] === "running");
+        // Play: Steam took the screen, or it refused and the game's card says why.
+        // Looked up by id: opening the app can finish before this poll ever sees it running.
+        const played = activity.value.find((j) => j.id === playJob.value && j.status !== "running");
+        if (played) {
+          playJob.value = null;
+          if (played.status === "failed") message.value = `Not started: ${played.error}`;
+          else { message.value = null; detailOpen.value = false; }
+        }
+        if (finished.some((j) => j.kind !== "play")) await reload();
+        // The background service's syncs are another process: its plan cache isn't ours to drop.
+        if (finished.some((j) => j.kind === "sync" || j.kind === "install")) loadSyncStatus(true);
+        if (syncBusy.value && !activity.value.some((j) => j.id === syncBusy.value && j.status === "running")) syncBusy.value = false;
       } catch (e) { /* daemon restarting; try again */ }
       pollTimer = setTimeout(pollActivity, runningJobs.value.length ? 500 : 3000);
     }
     const watchJobs = pollActivity;
     const jobColor = (j) => ({ running: "primary", done: "positive", failed: "negative" })[j.status];
     function jobDetail(j) {
+      if (j.kind === "play")
+        return [j.status === "running" ? "opening in Steam" : j.status === "done" ? "Steam is running it" : "",
+                j.error].filter(Boolean).join(" · ");
       const amount = j.unit === "bytes" ? `${size(j.done)} of ${size(j.total)}`
         : j.total ? `${j.done} of ${j.total} files` : j.status === "running" ? "" : "nothing to do";
       const failed = j.log.filter((l) => l.error).length;
@@ -257,6 +703,30 @@ const app = createApp({
                              : `Not removed: ${(await res.json()).detail}`;
       await reload();
       await nextTick(); focusFirst();
+    }
+
+    // Play: opens the game's own Steam app (added when it was installed; `romm-shelf play <rom>`), so
+    // Steam owns its window and gives it its own Steam Input profile (design.md § Controller rule).
+    const playJob = ref(null);
+    // A bare 404 for an /api/ route is the static-file fallback: the server is from another build,
+    // not a missing game. Say so instead of "Not Found".
+    function apiError(body, res) {
+      if (res.status === 404 && body.detail === "Not Found")
+        return "the UI's server is from an older build; close and reopen romm-shelf";
+      return typeof body.detail === "string" ? body.detail
+        : body.detail ? JSON.stringify(body.detail) : `HTTP ${res.status}`;
+    }
+    async function playNow() {
+      if (playJob.value) return;
+      message.value = null;
+      try {
+        const res = await fetch(`/api/rom/${detail.value.id}/play`, { method: "POST" });
+        const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+        if (!res.ok) { message.value = `Can't play: ${apiError(body, res)}`; return; }
+        playJob.value = body.id;
+        message.value = "Opening in Steam… (the first time, Steam adds it to your library)";
+        watchJobs();
+      } catch (e) { message.value = `Can't play: ${e}`; }
     }
     const pct = (j) => Math.floor(100 * j.done / (j.total || 1));
 
@@ -313,59 +783,190 @@ const app = createApp({
       elsewhere: { color: "positive", label: "found" },
       mismatch: { color: "warning", label: "wrong checksum" },
     })[f.local] || (f.on_romm ? { color: "primary", label: "on RomM" } : { color: "grey-8", label: "missing" });
-    // Patches tab (design.md § Patches): each change romm-shelf makes to the system,
-    // with the plan applying it would run now. Removing goes press-twice, showing what goes.
+    // Patches tab (design.md § Patches): each Ansible playbook, with what applying it would
+    // change now (check mode). Patches only converge: there is no remove.
     const PATCHES = "__patches";
     const patchList = ref([]), patchesLoading = ref(false), patchBusy = ref(null), patchMessage = ref(null);
-    const confirmPatch = ref(null);
+    const patchResult = ref({});
+    // A game's own settings (design.md § Patches, Per game): game-scoped patches checked for this
+    // game. Saving writes the YAML; Apply runs the playbook for this game only.
+    const gameSettingsOpen = ref(false), gamePatches = ref([]), gamePatchesLoading = ref(false);
+    const gamePatchesMessage = ref(null), settingsButton = ref(null);
+    const settingLabel = (s, v) => s.type === "choice" ? (s.choices[v] ?? v)
+      : s.type === "bool" ? (v ? "On" : "Off") : v;
+    // What leaving a setting unset gives: the playbook's own words for it, else the value above.
+    const inheritLabel = (s) => s.inherit || settingLabel(s, s.inherited);
+    // A game's settings are its game-scoped patches. Per-emulator patches are on the Patches tab,
+    // once for each emulator they're for (their target names only the emulator).
+    const isGamePatch = (p) => gamePatches.value.includes(p);
+    const forEmulator = (p) => (p.target && !p.target.game) ? p.target.emulator : null;
+    // One patch can be on the tab for several emulators: busy, results and errors are per entry.
+    const pkey = (p) => forEmulator(p) ? `${p.name}@${forEmulator(p)}` : p.name;
+    const settingChoices = (s) => s.type === "choice" ? Object.entries(s.choices) : [[true, "On"], [false, "Off"]];
+    // Per emulator, a value is only chosen when it's set there; otherwise Inherit is.
+    const chosen = (p, s, v) => (!forEmulator(p) || s.here) && s.value === v;
+    // Draw the list first, then run the checks and fill in the states. A check is a playbook per
+    // patch, so the listing is instant and the states arrive together once the slowest is done.
+    // The counters drop a check whose answer arrives after the list was redrawn under it.
+    let patchGeneration = 0, gameGeneration = 0;
+    function replacePatch(p, body) {  // a per-emulator patch can be in both lists: replace this one
+      for (const list of [patchList, gamePatches]) {
+        const i = list.value.indexOf(p);
+        if (i >= 0) { list.value[i] = body; return; }
+      }
+    }
+    function checkFailed(list, message) {
+      for (const p of list.value)
+        if (p.state === "checking") { p.state = "failed"; p.error = message; }
+    }
+    async function loadGamePatches() {
+      const generation = ++gameGeneration;
+      gamePatchesLoading.value = true; gamePatchesMessage.value = null;
+      try {
+        const res = await fetch(`/api/rom/${detail.value.id}/patches`);
+        if (!res.ok) throw new Error(`settings: HTTP ${res.status}`);
+        const body = await res.json();  // instantly: every patch is "checking"
+        if (generation !== gameGeneration) return;
+        gamePatches.value = body;
+      } catch (e) {
+        gamePatchesMessage.value = String(e);
+        gamePatchesLoading.value = false;
+        return;
+      }
+      gamePatchesLoading.value = false;
+      await nextTick();
+      if (!document.activeElement?.closest('[data-nav-group="game-settings"]'))
+        document.querySelector('[data-nav-group="game-settings"] [data-nav]')?.focus();
+      try {
+        const res = await fetch(`/api/rom/${detail.value.id}/patches?check=true`);
+        if (!res.ok) throw new Error(`settings: HTTP ${res.status}`);
+        if (generation === gameGeneration) gamePatches.value = await res.json();
+      } catch (e) {
+        if (generation !== gameGeneration) return;
+        gamePatchesMessage.value = String(e);
+        checkFailed(gamePatches, String(e));
+      }
+    }
+    function openGameSettings() {
+      if (!detail.value || detail.value.status !== "on-device") return;
+      gamePatches.value = []; gamePatchesMessage.value = null;
+      gameSettingsOpen.value = true;
+      loadGamePatches();
+    }
+    function closeGameSettings() { nextTick(() => settingsButton.value?.$el?.focus()); }
     async function loadPatches() {
-      patchesLoading.value = true;
+      const generation = ++patchGeneration;
+      patchesLoading.value = true; patchMessage.value = null;
       try {
         const res = await fetch("/api/patches");
         if (!res.ok) throw new Error(`patches: HTTP ${res.status}`);
-        patchList.value = await res.json();
-      } catch (e) { patchMessage.value = String(e); }
+        const body = await res.json();  // instantly: every patch is "checking"
+        if (generation !== patchGeneration) return;
+        patchList.value = body;
+      } catch (e) {
+        patchMessage.value = String(e);
+        patchesLoading.value = false;
+        return;
+      }
       patchesLoading.value = false;
       await nextTick();
-      if (!document.activeElement?.closest('[data-nav-group="grid"]'))
-        document.querySelector('[data-nav-group="grid"] [data-nav]')?.focus();
-    }
-    async function patchAct(p, action) {
-      if (patchBusy.value) return;
-      if (action === "remove" && confirmPatch.value !== p.name) { confirmPatch.value = p.name; return; }
-      confirmPatch.value = null; patchBusy.value = p.name; patchMessage.value = null;
-      const res = await fetch(`/api/patches/${p.name}/${action}`, { method: "POST" });
-      const job = await res.json();
-      if (!res.ok) { patchBusy.value = null; patchMessage.value = `Not done: ${job.detail}`; return; }
-      watchJobs();
-      while (true) {  // the job runs in the daemon; Activity has its log
-        await new Promise((r) => setTimeout(r, 500));
-        const j = activity.value.find((a) => a.id === job.id);
-        if (j && j.status !== "running") {
-          patchMessage.value = j.status === "done" ? `${action === "apply" ? "Applied" : "Removed"} ${p.name}. Restart ES-DE to pick it up.`
-                                                  : `Failed: ${j.error || "see Activity"}`;
-          break;
-        }
+      if (!document.activeElement?.closest('[data-nav-group="grid"]')) focusGrid();
+      try {
+        const res = await fetch("/api/patches?check=true");
+        if (!res.ok) throw new Error(`patches: HTTP ${res.status}`);
+        if (generation === patchGeneration) patchList.value = await res.json();
+      } catch (e) {
+        if (generation !== patchGeneration) return;
+        patchMessage.value = String(e);
+        checkFailed(patchList, String(e));
       }
-      patchBusy.value = null;
-      await loadPatches();
+    }
+    // Focus is only ever moved for the user onto something harmless: never onto a Remove
+    // button (after Apply, the button pressed goes away and focus used to land on Remove).
+    function focusGrid() {
+      document.querySelector('[data-nav-group="grid"] [data-nav]:not([data-nav-destructive])')?.focus();
+    }
+    // The outcome stays under the patch until it's acted on again: what failed, why, and
+    // each task Ansible ran (it stops at the first failure).
+    function patchOutcome(j) {
+      if (j.status === "done") {
+        const changed = j.log.filter((l) => l.changed).length;
+        return { ok: true, summary: changed ? `Applied: ${changed} change${changed === 1 ? "" : "s"}.` : "Applied: nothing to change." };
+      }
+      const failed = j.log.find((l) => l.error);
+      return { ok: false, summary: failed ? `Failed at: ${failed.step}` : "Apply failed.",
+               error: (failed && failed.error) || j.error || "unknown error; see Activity", log: j.log };
+    }
+    // Where a patch's settings and apply go: the game's, one emulator's, or every target's.
+    const patchUrl = (p) => isGamePatch(p) ? `/api/rom/${detail.value.id}/patches/${p.name}`
+      : forEmulator(p) ? `/api/emulators/${encodeURIComponent(forEmulator(p))}/patches/${p.name}`
+      : `/api/patches/${p.name}`;
+    async function patchAct(p) {
+      if (patchBusy.value || p.state === "checking") return;
+      const key = pkey(p);
+      patchBusy.value = key; patchMessage.value = null;
+      delete patchResult.value[key];
+      const perGame = isGamePatch(p);  // from a game's settings: run for that game
+      const url = `${patchUrl(p)}/apply`;
+      try {
+        const res = await fetch(url, { method: "POST" });
+        const job = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+        if (!res.ok) {
+          patchResult.value[key] = patchOutcome({ status: "failed", log: [], error: job.detail });
+          return;
+        }
+        watchJobs();
+        while (true) {  // the job runs in the daemon; Activity has its log too
+          await new Promise((r) => setTimeout(r, 500));
+          const j = activity.value.find((a) => a.id === job.id);
+          if (j && j.status !== "running") { patchResult.value[key] = patchOutcome(j); break; }
+        }
+      } catch (e) {
+        patchResult.value[key] = patchOutcome({ status: "failed", log: [], error: String(e) });
+      } finally {
+        patchBusy.value = null;
+      }
+      await (perGame ? loadGamePatches() : loadPatches());
+    }
+    // A setting is shown while the settings it depends on (show_if) have those values.
+    const shownSettings = (p) => (p.settings || []).filter((s) =>
+      Object.entries(s.show_if || {}).every(([k, v]) => p.settings.find((o) => o.key === k)?.value === v));
+    const settingBusy = ref(null), settingError = ref({});
+    async function setSetting(p, s, value) {
+      if (settingBusy.value) return;
+      if (patchList.value.includes(p)) patchGeneration++; else gameGeneration++;  // drop a stale check
+      const key = pkey(p);
+      settingBusy.value = `${key}.${s.key}`;
+      delete settingError.value[key];
+      delete patchResult.value[key];
+      const url = `${patchUrl(p)}/settings`;
+      try {
+        const res = await fetch(url, {
+          method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ [s.key]: value }) });
+        const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+        if (!res.ok) throw new Error(typeof body.detail === "string" ? body.detail : `HTTP ${res.status}`);
+        replacePatch(p, body);  // re-checked: its plan now shows what applying changes
+      } catch (e) {
+        settingError.value[key] = String(e.message || e);
+      } finally {
+        settingBusy.value = null;
+      }
     }
     const patchBadge = (p) => ({
       applied: { color: "positive", label: "applied" },
-      update: { color: "primary", label: "update" },
-      "not-applied": { color: "grey-8", label: "not applied" },
-      blocked: { color: "warning", label: "blocked" },
-    })[p.state];
+      pending: { color: "grey-7", label: "pending" },
+      failed: { color: "warning", label: "failed" },
+      checking: { color: "grey-8", label: "checking…" },
+    })[p.state] || { color: "grey-8", label: p.state };
 
     Vue.watch(() => platform.value, (p) => {
-      confirmBios.value = null; confirmPatch.value = null;
+      confirmBios.value = null;
       if (p === BIOS && !bios.value.length) loadBios();
       if (p === PATCHES && !patchList.value.length) loadPatches();
-    });
+    }, { immediate: true });  // the remembered tab may be one of these
 
     const platforms = computed(() => lib.value.platforms);
-    const tabs = computed(() => [...platforms.value.map((p) => p.slug), ACTIVITY, PATCHES, BIOS]);
-    const shown = computed(() => lib.value.roms.filter((r) => r.platform === platform.value));
+    const tabs = computed(() => [ALL, ...platforms.value.map((p) => p.slug), ACTIVITY, PATCHES, BIOS]);
 
     async function load(refresh = false) {
       loading.value = true; error.value = null;
@@ -374,31 +975,145 @@ const app = createApp({
         if (!res.ok) throw new Error(`library: HTTP ${res.status}`);
         lib.value = await res.json();
         const withGames = lib.value.platforms.find((p) => p.on_device) || lib.value.platforms[0];
-        if (![BIOS, ACTIVITY, PATCHES].includes(platform.value) && !lib.value.platforms.some((p) => p.slug === platform.value)) platform.value = withGames?.slug;
+        if (![ALL, BIOS, ACTIVITY, PATCHES].includes(platform.value) && !lib.value.platforms.some((p) => p.slug === platform.value)) platform.value = withGames?.slug ?? ALL;
       } catch (e) { error.value = String(e); }
       loading.value = false;
-      await nextTick(); focusFirst();
+      loadSyncStatus(refresh);
+      await nextTick();
+      if (!document.activeElement?.closest("[data-nav]")) focusGrid();
     }
 
+    window.addEventListener("nav-search", () => {
+      if (detailOpen.value) return;
+      if (!isLibrary.value) platform.value = ALL;
+      nextTick(() => { searchBox.value?.focus(); searchBox.value?.select(); });
+    });
+    // Enter or Escape in the search box (or A/B on a pad) hands focus to the results.
+    window.addEventListener("nav-search-done", () => { focusGrid(); });
+
+    // The game page opens at once with what the grid knows; saves and the summary fill in.
     async function open(r) {
       lastFocus = document.activeElement;
       message.value = null; confirmRemove.value = false;
-      detail.value = await (await fetch(`/api/rom/${r.id}`)).json();
-      detailOpen.value = true;
+      gameSettingsOpen.value = false; gamePatches.value = []; gamePatchesMessage.value = null;
+      detail.value = { ...r, summary: "", local_files: [], server_saves: 0, server_states: 0 };
+      detailLoading.value = true; detailOpen.value = true;
       await nextTick(); setTimeout(() => focusFirst(), 50);
+      try {
+        const res = await fetch(`/api/rom/${r.id}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const full = await res.json();
+        if (detail.value?.id === r.id) detail.value = full;
+      } catch (e) { if (detail.value?.id === r.id) message.value = `Couldn't read this game's saves: ${e}`; }
+      if (detail.value?.id === r.id) detailLoading.value = false;
     }
     function restoreFocus() { lastFocus?.focus(); }
 
+    // Extras (the manual, screenshots, video). The manual is drawn with pdf.js, page by page as it
+    // scrolls near, so the controller can scroll it: a browser's own PDF viewer can't be driven from here.
+    const extrasOpen = ref(false), extra = ref(null), extraStatus = ref(null);
+    const extrasView = ref(null), manualPages = ref(null), extrasVideo = ref(null), extrasButton = ref(null);
+    let pdfDoc = null, pageWatch = null, extraGeneration = 0;
+    const extraLabel = (e) => e.kind === "manual" ? "Manual" : e.kind === "video" ? "Video"
+      : `Screenshot ${e.name.split("-")[1]}`;
+    function extrasLabel(list) {
+      return list.some((e) => e.kind === "manual") ? "Manual & extras" : "Screenshots";
+    }
+    function clearManual() {
+      pageWatch?.disconnect(); pageWatch = null;
+      pdfDoc?.destroy(); pdfDoc = null;
+      manualPages.value?.replaceChildren();
+    }
+    async function showExtra(e) {
+      if (extra.value?.name === e.name) return;
+      const generation = ++extraGeneration;
+      clearManual();
+      extra.value = e; extraStatus.value = null;
+      extrasView.value?.scrollTo(0, 0);
+      if (e.kind !== "manual") return;
+      extraStatus.value = "Loading manual…";
+      try {
+        const pdfjs = await import("/vendor/pdfjs/pdf.min.mjs");
+        pdfjs.GlobalWorkerOptions.workerSrc = "/vendor/pdfjs/pdf.worker.min.mjs";
+        const doc = await pdfjs.getDocument(e.url).promise;
+        if (generation !== extraGeneration) { doc.destroy(); return; }
+        pdfDoc = doc;
+        await nextTick();
+        const box = manualPages.value, view = extrasView.value;
+        const width = Math.min(view.clientWidth - 24, 960), ratio = window.devicePixelRatio || 1;
+        pageWatch = new IntersectionObserver((seen) => {
+          for (const s of seen) {
+            if (!s.isIntersecting || s.target.dataset.drawn) continue;
+            s.target.dataset.drawn = "1";
+            draw(doc, s.target, generation);
+          }
+        }, { root: view, rootMargin: "150% 0px" });
+        // Every page gets its place at once (sized from page 1), so the scrollbar and paging are right.
+        const first = (await doc.getPage(1)).getViewport({ scale: 1 });
+        for (let n = 1; n <= doc.numPages; n++) {
+          const c = document.createElement("canvas");
+          c.dataset.page = n; c.dataset.ratio = ratio;
+          c.style.width = `${width}px`; c.style.height = `${width * first.height / first.width}px`;
+          box.appendChild(c); pageWatch.observe(c);
+        }
+        extraStatus.value = `${doc.numPages} pages`;
+      } catch (err) {
+        if (generation === extraGeneration) extraStatus.value = `Couldn't open the manual: ${err.message || err}`;
+      }
+    }
+    async function draw(doc, canvas, generation) {
+      const page = await doc.getPage(Number(canvas.dataset.page));
+      if (generation !== extraGeneration) return;
+      const width = parseFloat(canvas.style.width), ratio = Number(canvas.dataset.ratio);
+      const base = page.getViewport({ scale: 1 });
+      const viewport = page.getViewport({ scale: width / base.width * ratio });
+      canvas.width = viewport.width; canvas.height = viewport.height;
+      canvas.style.height = `${viewport.height / ratio}px`;
+      await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise.catch(() => {});
+    }
+    function openExtras() {
+      const list = detail.value?.extras || [];
+      if (!list.length) return;
+      extrasOpen.value = true;
+      showExtra(list[0]);
+      nextTick(() => setTimeout(() => extrasView.value?.focus(), 50));
+    }
+    function stepExtra(step) {
+      const list = detail.value?.extras || [];
+      const i = list.findIndex((e) => e.name === extra.value?.name);
+      showExtra(list[(i + step + list.length) % list.length]);
+      nextTick(() => document.querySelector(".extras-tabs .bg-primary")?.scrollIntoView({ inline: "center" }));
+    }
+    function pageExtra(step) {
+      const v = extrasView.value;
+      if (v) v.scrollBy({ top: step * v.clientHeight * 0.9, behavior: "smooth" });
+    }
+    function toggleVideo() {
+      const v = extrasVideo.value;
+      if (v) v.paused ? v.play() : v.pause();
+    }
+    function closeExtras() {
+      ++extraGeneration; clearManual(); extra.value = null; extraStatus.value = null;
+      nextTick(() => extrasButton.value?.$el?.focus());
+    }
+
     function cycle(step) {
+      if (extrasOpen.value) return stepExtra(step);
       const ts = tabs.value; if (detailOpen.value) return;
       const i = ts.indexOf(platform.value);
       platform.value = ts[(i + step + ts.length) % ts.length];
-      nextTick(() => { document.querySelector(".tab.active")?.scrollIntoView({ inline: "center" });
-                       document.querySelector('[data-nav-group="grid"] [data-nav]')?.focus(); });
+      nextTick(() => { document.querySelector(".tab.active")?.scrollIntoView({ inline: "center" }); focusGrid(); });
     }
     window.addEventListener("nav-prev-tab", () => cycle(-1));
     window.addEventListener("nav-next-tab", () => cycle(1));
-    window.addEventListener("nav-back", () => { detailOpen.value = false; });
+    window.addEventListener("nav-prev-page", () => extrasOpen.value ? pageExtra(-1) : stepLetter(-1));
+    window.addEventListener("nav-next-page", () => extrasOpen.value ? pageExtra(1) : stepLetter(1));
+    window.addEventListener("nav-back", () => {
+      if (extrasOpen.value) { extrasOpen.value = false; return; }
+      if (gameSettingsOpen.value) { gameSettingsOpen.value = false; return; }
+      detailOpen.value = false;
+    });
+    Vue.watch(detailOpen, (open) => { if (!open) { gameSettingsOpen.value = false; extrasOpen.value = false; } });
     window.addEventListener("nav-refresh", () => {
       if (detailOpen.value) return;
       platform.value === BIOS ? loadBios() : platform.value === ACTIVITY ? pollActivity()
@@ -410,11 +1125,20 @@ const app = createApp({
 
     load();
     watchJobs();  // pick up downloads already running in the daemon
-    return { platforms, platform, shown, loading, error, detail, detailOpen, open, restoreFocus, size, when,
+    return { lib, load, ALL, isLibrary, query, filter, FILTERS, searchBox, narrowed, tabCount, filterCount, filterNote,
+             letterOf, onCardFocus, jumpLetter, sentinel, limit, PAGE, detailLoading,
+             syncState, syncLoading, syncBusy, syncIds, syncNow, syncBadge,
+             platforms, platform, shown, loading, error, detail, detailOpen, open, restoreFocus, size, when,
              jobs, job, message, busy, confirmRemove, install, uninstall, pct,
+             playJob, playNow,
              BIOS, bios, biosLoading, biosBusy, biosMessage, confirmBios, biosGet, biosAct, gettable, summary, badge,
              expanded, unavailable, visible,
-             PATCHES, patchList, patchesLoading, patchBusy, patchMessage, confirmPatch, patchAct, patchBadge,
+             PATCHES, patchList, patchesLoading, patchBusy, patchMessage, patchResult, patchAct, patchBadge,
+             shownSettings, settingBusy, settingError, setSetting,
+             gameSettingsOpen, gamePatches, gamePatchesLoading, gamePatchesMessage, settingsButton,
+             openGameSettings, closeGameSettings, settingLabel, inheritLabel, forEmulator, pkey, settingChoices, chosen,
+             extrasOpen, extra, extraStatus, extrasView, manualPages, extrasVideo, extrasButton, extraLabel,
+             extrasLabel, showExtra, openExtras, closeExtras, toggleVideo,
              ACTIVITY, activity, openJob, runningJobs, jobColor, jobDetail, ago };
   },
 });

@@ -1,39 +1,46 @@
-"""Installing and removing romm-shelf's hooks into ES-DE and systemd.
+"""Two patches (patching.py): ES-DE's game-start/game-end hooks, and the background service.
 
-Everything here is a plan first (a list of Changes that can be printed) and an
-action second. Installed files carry a marker line, and removal only touches
-files that have it, so romm-shelf never deletes something it didn't write.
+`hooks` writes ES-DE event scripts and turns on ES-DE's custom event scripts.
+`background` is the systemd user unit running `romm-shelf serve`: the endpoint
+the scripts call, and the sync before sleep. The hooks do nothing without it
+(the scripts fail open), but each is installed and removed on its own.
 """
 
 import json
-import shutil
-import subprocess
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from romm_shelf.config import Settings
+from romm_shelf.patching import File, Setting, Task, Unit, marker_line, owned
 
-MARKER = "# Installed by romm-shelf; `romm-shelf hooks remove` undoes it."
 SCRIPT_NAME = "50-romm-shelf.sh"
-SETTING_OFF = '<bool name="CustomEventScripts" value="false" />'
-SETTING_ON = '<bool name="CustomEventScripts" value="true" />'
 UNIT_NAME = "romm-shelf.service"
+ES_SETTING = r'^<bool name="CustomEventScripts" value="(?P<value>true|false)" />$'
 
 # Runs inside the RetroDECK flatpak, which can reach the host's 127.0.0.1 but
-# can't start host processes. It fails open: if the daemon isn't there, the
-# game launches anyway. game-start waits (ES-DE blocks on it) so the save is
-# pulled before the emulator reads it; game-end returns at once.
-SCRIPT = """#!/bin/sh
+# can't start host processes. It fails open: if the service isn't there, the
+# game launches anyway.
+# game-start waits (ES-DE blocks on it) so the save is pulled before the emulator
+# reads it. game-end must not: ES-DE writes the game's lastplayed and play count
+# only after the script returns, and Steam's "Exit game" kills ES-DE within a
+# second or two of the game closing. So it sends the request and returns.
+SCRIPT = {
+    "game-start": """#!/bin/sh
 {marker}
-curl -s -o /dev/null -m {timeout} -X POST -G --data-urlencode "rom=$1" \\
-  "http://127.0.0.1:{port}/api/hook/{event}" 2>/dev/null
+curl -s -o /dev/null -m 60 -X POST -G --data-urlencode "rom=$1" \\
+  "http://127.0.0.1:{port}/api/hook/game-start" 2>/dev/null
 exit 0
-"""
+""",
+    "game-end": """#!/bin/sh
+{marker}
+curl -s -o /dev/null -m 10 -X POST -G --data-urlencode "rom=$1" \\
+  "http://127.0.0.1:{port}/api/hook/game-end" >/dev/null 2>&1 </dev/null &
+exit 0
+""",
+}
 
 UNIT = """{marker}
 [Unit]
-Description=romm-shelf: RomM shelf UI, ES-DE hooks and sync before sleep
+Description=romm-shelf background service: ES-DE hook endpoint and sync before sleep
 
 [Service]
 ExecStart={exec_start}
@@ -45,100 +52,33 @@ WantedBy=default.target
 """
 
 
-@dataclass(frozen=True)
-class Change:
-    action: Literal["write", "remove", "edit", "run"]
-    target: Path | str
-    detail: str
-    content: str | None = None
-
-    def describe(self) -> str:
-        return f"{self.action:6} {self.target}  ({self.detail})"
-
-
-def paths(settings: Settings) -> dict[str, Path]:
+def scripts_dir(settings: Settings) -> Path:
     rd = json.loads(settings.resolve(settings.retrodeck_config).read_text())["paths"]
-    home = settings.resolve(rd["rd_home_path"])
-    return {
-        "scripts": home / "ES-DE" / "scripts",
-        "es_settings": settings.resolve(settings.es_settings),
-        "unit": settings.resolve(settings.systemd_user_dir) / UNIT_NAME,
-    }
+    return settings.resolve(rd["rd_home_path"]) / "ES-DE" / "scripts"
 
 
-def _script(event: str, settings: Settings) -> str:
-    timeout = 60 if event == "game-start" else 5
-    return SCRIPT.format(marker=MARKER, timeout=timeout, port=settings.port, event=event)
+def unit_path(settings: Settings) -> Path:
+    return settings.resolve(settings.systemd_user_dir) / UNIT_NAME
 
 
-def _ours(path: Path) -> bool:
-    try:
-        return MARKER in path.read_text()
-    except OSError:
-        return False
+def hooks_tasks(settings: Settings) -> list[Task]:
+    scripts = scripts_dir(settings)
+    tasks: list[Task] = [
+        File(scripts / event / SCRIPT_NAME, SCRIPT[event].format(marker=marker_line("hooks"), port=settings.port),
+             f"ES-DE {event} hook", mode=0o755)
+        for event in ("game-start", "game-end")
+    ]
+    # Turned back off on removal only if no one else's scripts would be left needing it.
+    others = [f for f in scripts.rglob("*") if f.is_file() and not owned(f) and f.name != ".directory"] \
+        if scripts.exists() else []
+    es_settings = settings.resolve(settings.es_settings)
+    tasks.append(Setting(es_settings, ES_SETTING, "true", None if others else "false",
+                         "ES-DE CustomEventScripts", closed="es-de",
+                         missing=f"CustomEventScripts not found in {es_settings}; turn on 'Enable custom "
+                                 "event scripts' in ES-DE's Other settings once, then retry."))
+    return tasks
 
 
-def es_de_running() -> bool:
-    # Exact process name: -f would also match any command line that merely mentions es-de.
-    return subprocess.run(["pgrep", "-x", "es-de"], capture_output=True).returncode == 0
-
-
-def install_plan(settings: Settings, exec_start: str) -> list[Change]:
-    p = paths(settings)
-    changes = []
-    for event in ("game-start", "game-end"):
-        target = p["scripts"] / event / SCRIPT_NAME
-        content = _script(event, settings)
-        if not target.exists() or target.read_text() != content:
-            changes.append(Change("write", target, f"ES-DE {event} hook", content))
-    text = p["es_settings"].read_text()
-    if SETTING_OFF in text:
-        changes.append(Change("edit", p["es_settings"], "CustomEventScripts false -> true"))
-    elif SETTING_ON not in text:
-        raise SystemExit(f"CustomEventScripts not found in {p['es_settings']}; turn on "
-                         "'Enable custom event scripts' in ES-DE's Other settings once, then retry.")
-    unit = UNIT.format(marker=MARKER, exec_start=exec_start)
-    if not p["unit"].exists() or p["unit"].read_text() != unit:
-        changes.append(Change("write", p["unit"], "systemd user unit", unit))
-        changes.append(Change("run", "systemctl --user daemon-reload", "pick up the unit"))
-    changes.append(Change("run", f"systemctl --user enable --now {UNIT_NAME}", "start the daemon at login"))
-    return changes
-
-
-def remove_plan(settings: Settings) -> list[Change]:
-    p = paths(settings)
-    changes = []
-    for event in ("game-start", "game-end"):
-        target = p["scripts"] / event / SCRIPT_NAME
-        if _ours(target):
-            changes.append(Change("remove", target, f"ES-DE {event} hook"))
-    # Turn ES-DE's setting back off only if no other scripts would be left behind.
-    others = [f for f in p["scripts"].rglob("*") if f.is_file() and not _ours(f) and f.name != ".directory"] \
-        if p["scripts"].exists() else []
-    if not others and SETTING_ON in p["es_settings"].read_text():
-        changes.append(Change("edit", p["es_settings"], "CustomEventScripts true -> false"))
-    if _ours(p["unit"]):
-        changes.append(Change("run", f"systemctl --user disable --now {UNIT_NAME}", "stop the daemon"))
-        changes.append(Change("remove", p["unit"], "systemd user unit"))
-    return changes
-
-
-def apply(changes: list[Change]) -> None:
-    if any(c.action == "edit" for c in changes) and es_de_running():
-        raise SystemExit("ES-DE is running and rewrites its settings when it exits; close it and retry.")
-    for c in changes:
-        match c.action:
-            case "write":
-                c.target.parent.mkdir(parents=True, exist_ok=True)
-                c.target.write_text(c.content)
-                if c.target.suffix == ".sh":
-                    c.target.chmod(0o755)
-            case "remove":
-                c.target.unlink()
-            case "edit":
-                text = c.target.read_text()
-                shutil.copy2(c.target, c.target.with_name(c.target.name + ".romm-shelf.bak"))
-                swap = (SETTING_OFF, SETTING_ON) if "-> true" in c.detail else (SETTING_ON, SETTING_OFF)
-                c.target.write_text(text.replace(*swap, 1))
-            case "run":
-                subprocess.run(c.target.split(), check=True)
+def background_tasks(settings: Settings, exec_start: str) -> list[Task]:
+    return [Unit(unit_path(settings), UNIT.format(marker=marker_line("background"), exec_start=exec_start),
+                 "systemd user unit")]

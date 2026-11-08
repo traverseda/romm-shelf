@@ -1,0 +1,121 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Contract tests
+        run: scripts/test.sh
+      - name: Wheel and sdist
+        run: scripts/build-wheel.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*
+          if-no-files-found: error
+
+  docker:
+    needs: test
+    # The image needs a Nix build of the whole emulator closure, a ~6 GB build
+    # context and a ~20 GB upstream-plus-bundle image. Every branch push builds
+    # it (the Nix cache keeps later runs cheap); a pull request builds it only
+    # when labelled "build-docker".
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'build-docker')
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # GitHub's runner has ~14 GB free; the emulator closure, build context
+      # and image need considerably more.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          sudo apt-get clean
+          df -h /
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # The first run builds RPCS3 and the other emulators; later runs restore
+      # them from the store cache.
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 8G
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      # main, a v* tag, or a manual dispatch publishes; anything else only
+      # proves the image builds.
+      - name: Decide whether to publish
+        id: publish
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] ||
+             { [ "${{ github.event_name }}" = "push" ] &&
+               { [ "${{ github.ref }}" = "refs/heads/main" ] ||
+                 [[ "${{ github.ref }}" == refs/tags/v* ]]; }; }; then
+            echo "yes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "yes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Nix package
+        run: scripts/build-nix.sh
+
+      - name: Log in to GHCR
+        if: steps.publish.outputs.yes == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Publish streaming image
+        if: steps.publish.outputs.yes == 'true'
+        run: scripts/publish-docker.sh
+
+      # The Dockerfile already runs romm-shelf and checks the emulator bundle
+      # during the build. --cache-only keeps the ~20 GB image off the runner's
+      # disk; the checks are the build's own RUN steps.
+      - name: Build without publishing
+        if: steps.publish.outputs.yes != 'true'
+        run: scripts/build-docker.sh --tag ci --cache-only
+
+      - name: Free build output
+        if: always()
+        run: |
+          rm -rf dist/docker-context dist/docker-wheels
+          docker builder prune -af || true
+          docker system prune -af --volumes || true
+          df -h /

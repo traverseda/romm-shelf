@@ -1,0 +1,49 @@
+"""How romm-shelf names itself in units and shortcuts, from a checkout and from an AppImage."""
+from pathlib import Path
+
+from romm_shelf import config
+from romm_shelf.config import Settings
+
+
+def test_checkout_uses_the_running_script(monkeypatch, tmp_path):
+    script = tmp_path / "bin/romm-shelf"
+    monkeypatch.delenv("APPIMAGE", raising=False)
+    monkeypatch.delenv("APPDIR", raising=False)
+    monkeypatch.setattr(config.sys, "argv", [str(script), "patches"])
+    assert config.program() == str(script.resolve())
+
+
+def test_appimage_uses_the_file_not_the_mount(monkeypatch, tmp_path):
+    # This module's own folder stands in for the mount: romm-shelf really is inside it.
+    appdir = Path(config.__file__).resolve().parents[2]
+    monkeypatch.setenv("APPDIR", str(appdir))
+    monkeypatch.setenv("APPIMAGE", "/home/deck/Applications/romm-shelf.AppImage")
+    monkeypatch.setattr(config.sys, "argv", ["-c"])
+    assert config.program() == "/home/deck/Applications/romm-shelf.AppImage"
+
+
+def test_nix_appimage_binds_its_store_to_nix(monkeypatch, tmp_path):
+    # The code runs from /nix/store/…; the AppImage's copy of the same file is under $APPDIR/nix/store/….
+    here = Path(config.__file__).resolve()
+    copy = tmp_path / here.relative_to("/")
+    copy.parent.mkdir(parents=True)
+    copy.write_text("")
+    monkeypatch.setenv("APPDIR", str(tmp_path))
+    monkeypatch.setenv("APPIMAGE", "/home/deck/Applications/romm-shelf.AppImage")
+    assert config.program() == "/home/deck/Applications/romm-shelf.AppImage"
+
+
+def test_an_inherited_appimage_is_not_ours(monkeypatch, tmp_path):
+    monkeypatch.setenv("APPDIR", str(tmp_path / "some-other-mount"))
+    monkeypatch.setenv("APPIMAGE", "/home/deck/Applications/other.AppImage")
+    monkeypatch.setattr(config.sys, "argv", [str(tmp_path / "romm-shelf")])
+    assert config.program() == str((tmp_path / "romm-shelf").resolve())
+
+
+def test_host_env_drops_the_runtime_variables(monkeypatch):
+    for k in ("APPDIR", "APPIMAGE", "ARGV0", "OWD", "APPIMAGE_EXTRACT_AND_RUN"):
+        monkeypatch.setenv(k, "x")
+    monkeypatch.setenv("HOME", "/home/deck")
+    env = config.host_env({"GAME_SAVE_DIR": "/saves"})
+    assert not {"APPDIR", "APPIMAGE", "ARGV0", "OWD", "APPIMAGE_EXTRACT_AND_RUN"} & env.keys()
+    assert env["HOME"] == "/home/deck" and env["GAME_SAVE_DIR"] == "/saves"

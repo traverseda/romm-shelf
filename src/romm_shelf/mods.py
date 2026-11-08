@@ -15,7 +15,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from romm_shelf import shelf
+from romm_shelf import content, shelf
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.romm import Rom, RommClient
 
@@ -206,7 +206,7 @@ def install_plan(rom: Rom, text: str, layout: RetroDeckLayout, remote: list[Rom]
         # An uninstall leaves the mod's save folders behind; those get filled back in.
         if root.exists() and next(root.rglob("*.xml"), None):
             raise FileExistsError(f"{root} already exists")
-    if shutil.disk_usage(layout.roms).free < rom.fs_size_bytes * 1.1:
+    if shutil.disk_usage(shelf.existing_ancestor(layout.roms / rom.platform_fs_slug)).free < rom.fs_size_bytes * 1.1:
         raise OSError(f"not enough space for {rom.fs_size_bytes / 2**30:.2f} GB")
     base = None
     if not d.base.exists():
@@ -305,22 +305,28 @@ def uninstall(removed: list[Path]) -> None:
 # One entry point for any ROM, so the CLI and the daemon treat mods the same way.
 
 def plan_install(rom: Rom, client: RommClient, layout: RetroDeckLayout,
-                 remote: list[Rom]) -> shelf.InstallPlan | ModInstallPlan:
+                 remote: list[Rom]) -> shelf.InstallPlan | ModInstallPlan | content.SplitInstallPlan:
     if rom.is_folder and rom.platform_fs_slug in SYSTEMS:
         text = client.rom_file(rom.id, descriptor_name(rom))
         if text is not None and parse(Path(descriptor_name(rom)), text):
             return install_plan(rom, text, layout, remote)
+    if content.base_file(rom):
+        return content.install_plan(rom, layout)
     return shelf.install_plan(rom, layout)
 
 
-def run_install(plan: shelf.InstallPlan | ModInstallPlan, client: RommClient,
+def run_install(plan: shelf.InstallPlan | ModInstallPlan | content.SplitInstallPlan, client: RommClient,
                 progress: shelf.Progress | None = None) -> Path:
     if isinstance(plan, ModInstallPlan):
         return install(plan, client, progress)
+    if isinstance(plan, content.SplitInstallPlan):
+        return content.install(plan, client, progress)
     return shelf.install(plan, client, progress)
 
 
-def plan_uninstall(path: Path, layout: RetroDeckLayout,
+def plan_uninstall(path: Path, rom: Rom, layout: RetroDeckLayout,
                    fs_root: Path = Path("/")) -> tuple[list[Path], list[Path]]:
+    if path.name == content.base_file(rom):
+        return content.uninstall_plan(path, rom, layout), []
     d = load(path, fs_root) if path.parent.name in SYSTEMS else None
     return uninstall_plan(d, layout) if d else ([path], [])

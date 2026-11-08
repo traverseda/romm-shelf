@@ -3,6 +3,7 @@
 import json
 import sys
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -12,10 +13,11 @@ from loguru import logger
 
 from romm_shelf.adapters import DiscReader, load_adapters
 from romm_shelf.auth import device_login, load_session, save_credentials
-from romm_shelf.config import Settings
+from romm_shelf.config import Settings, program
 from romm_shelf.layout import RetroDeckLayout
-from romm_shelf.library import match, scan_local
-from romm_shelf import bios, external, hooks, mods, patches
+from romm_shelf.library import LocalRom, match, name_matches, scan_local
+from romm_shelf.romm import Rom
+from romm_shelf import bios, media, mods, native, patches, player, proton, steam
 from romm_shelf.service import rom_for_path, sync_roms
 from romm_shelf.sync import inventory, negotiate_payload
 
@@ -66,19 +68,23 @@ def list_roms(
     platform: Annotated[str | None, typer.Option(help="Only this platform fs_slug")] = None,
     remote: Annotated[bool, typer.Option("--remote", help="Only games not on this device")] = False,
     local: Annotated[bool, typer.Option("--local", help="Only games RomM doesn't know")] = False,
+    on_device: Annotated[bool, typer.Option("--on-device", help="Only RomM games installed here")] = False,
+    search: Annotated[str | None, typer.Option(help="Only names containing every word (case, accents ignored)")] = None,
     summary: Annotated[bool, typer.Option(help="Counts per platform instead of a list")] = False,
 ):
-    """The library, matched against this device."""
+    """The library, matched against this device. Saves out of sync: `sync --all --plan`."""
     settings, session, client, layout = _context()
     m = match(scan_local(layout.roms), client.roms())
     rows = []
     if not local:
-        rows += [("remote", r.platform_fs_slug, r.fs_name, r.id) for r in m.remote_only]
+        if not on_device:
+            rows += [("remote", r.platform_fs_slug, r.fs_name, r.id, r.name) for r in m.remote_only]
         if not remote:
-            rows += [("on-device", r.platform_fs_slug, r.fs_name, r.id) for _, r in m.matched]
-    if not remote:
-        rows += [("local-only", l.system, l.name, None) for l in m.local_only]
-    rows = [r for r in rows if platform is None or r[1] == platform]
+            rows += [("on-device", r.platform_fs_slug, r.fs_name, r.id, r.name) for _, r in m.matched]
+    if not remote and not on_device:
+        rows += [("local-only", l.system, l.name, None, None) for l in m.local_only]
+    rows = [r[:4] for r in rows if (platform is None or r[1] == platform)
+            and (search is None or name_matches(search, r[2], r[4]))]
     if summary:
         for (state, plat), n in sorted(Counter((r[0], r[1]) for r in rows).items()):
             typer.echo(f"{plat:12} {state:10} {n}")
@@ -88,13 +94,32 @@ def list_roms(
 
 
 @app.command()
-def serve():
-    """Run the local daemon on 127.0.0.1: UI, ES-DE hook endpoints, sync before sleep."""
+def serve(
+    ui: Annotated[bool, typer.Option("--ui", help="The UI's server (what `ui` runs), not the background service")]
+        = False,
+):
+    """Run the background service on 127.0.0.1: the ES-DE hook endpoint and sync before sleep."""
     import uvicorn
 
     from romm_shelf.server import create_app
 
-    uvicorn.run(create_app(), host="127.0.0.1", port=Settings().port, log_level="info")
+    settings = Settings()
+    uvicorn.run(create_app(settings, ui=ui), host="127.0.0.1",
+                port=settings.ui_port if ui else settings.port, log_level="info")
+
+
+@app.command("gyro")
+def gyro_serve(
+    device: Annotated[Path | None, typer.Option(help="The controller's hidraw node; found when unset")] = None,
+):
+    """Serve the Deck's motion sensor as a DSU server on 127.0.0.1:26760 (what the gyro patch runs)."""
+    from romm_shelf import gyro
+
+    device = device or gyro.find_deck()
+    if device is None:
+        raise typer.Exit("no Steam Deck controller found under /sys/class/hidraw")
+    typer.echo(f"serving motion from {device} on {gyro.HOST}:{gyro.PORT}")
+    gyro.serve(device)
 
 
 # Game Mode launcher (design.md § UI). Firefox is the browser SteamOS users have from
@@ -131,23 +156,96 @@ def _daemon_up(url: str) -> bool:
         return False
 
 
+def _daemon_stamp(url: str) -> str | None:
+    import httpx
+
+    try:
+        res = httpx.get(f"{url}/api/stamp", timeout=2)
+        return res.json().get("stamp") if res.is_success else None
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+def _ui_server_pids() -> list[int]:
+    """This user's `romm-shelf serve --ui` processes, for a server from a build with no /api/quit.
+
+    `uv run` leaves a parent and the actual server, so every match is stopped.
+    """
+    import os
+
+    me = os.getuid()
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != me:
+                continue
+            args = [a.decode("utf-8", "replace") for a in (entry / "cmdline").read_bytes().split(b"\0") if a]
+        except OSError:
+            continue
+        if "serve" in args and "--ui" in args:
+            found.append(int(entry.name))
+    return found
+
+
+def _stop_daemon(url: str) -> bool:
+    import os
+    import signal
+    import time
+
+    import httpx
+
+    try:
+        httpx.post(f"{url}/api/quit", timeout=2)
+    except httpx.HTTPError:
+        pass
+    for _ in range(40):
+        if not _daemon_up(url):
+            return True
+        time.sleep(0.25)
+    if pids := _ui_server_pids():
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        for _ in range(40):
+            if not _daemon_up(url):
+                return True
+            time.sleep(0.25)
+    return False
+
+
 @app.command()
 def ui():
-    """Open the UI full screen (what the Steam shortcut runs). Starts the daemon if it isn't running."""
-    import os
+    """Open the UI full screen (what the Steam shortcut runs), with its own server while it's open."""
     import shutil
     import subprocess
     import time
 
-    url = f"http://127.0.0.1:{Settings().port}"
+    from romm_shelf.server import code_stamp
+
+    url = f"http://127.0.0.1:{Settings().ui_port}"
+    # The UI's server is this launcher's child: it goes when Firefox closes, and when Steam's
+    # "Exit game" ends the launcher. One left over from a launch that was killed is reused, but
+    # only from this build: an older one answers the new static files with its old API.
+    server = None
+    if _daemon_up(url) and _daemon_stamp(url) != code_stamp():
+        if not _stop_daemon(url):
+            raise typer.Exit(f"the UI's server on {url} is from another build and didn't stop; "
+                             "close it and try again")
     if not _daemon_up(url):
-        subprocess.run(["systemctl", "--user", "start", "romm-shelf.service"], check=False)
-        for _ in range(40):
+        server = subprocess.Popen([program(), "serve", "--ui"])
+        for _ in range(80):
             if _daemon_up(url):
                 break
+            if server.poll() is not None:
+                raise typer.Exit(f"the UI's server exited ({server.returncode})")
             time.sleep(0.25)
         else:
-            raise typer.Exit(f"the romm-shelf daemon isn't answering on {url}")
+            server.terminate()
+            raise typer.Exit(f"the UI's server isn't answering on {url}")
     # Inside Firefox's own Flatpak data folder: the sandbox can't see the rest of home.
     profile = Path("~/.var/app/org.mozilla.firefox/data/romm-shelf-profile").expanduser()
     profile.mkdir(parents=True, exist_ok=True)
@@ -158,37 +256,126 @@ def ui():
         stale = profile / name  # the last session; there's never anything in it worth restoring
         shutil.rmtree(stale) if stale.is_dir() else stale.unlink(missing_ok=True)
     (profile / "user.js").write_text("".join(f'user_pref("{k}", {v});\n' for k, v in FIREFOX_PREFS.items()))
-    os.execvp(FIREFOX[0], [*FIREFOX, "--kiosk", "--no-remote", "--profile", str(profile), url])
+    try:
+        subprocess.run([*FIREFOX, "--kiosk", "--no-remote", "--profile", str(profile), url])
+    finally:
+        if server is not None:
+            server.terminate()
+
+
+def _steam_shortcut(file: str, name: str, comment: str, command: str, plan: bool) -> None:
+    desktop = steam.APPLICATIONS / f"{file}.desktop"
+    entry = steam.entry_text(name, command, comment)
+    typer.echo(f"write {desktop}:\n{entry}")
+    typer.echo(f"steam steam://addnonsteamgame/{desktop}")
+    if plan:
+        return
+    steam.write_desktop(desktop, entry)
+    steam.add(desktop)
+    typer.echo("# added. In Game Mode it's under Library → Non-Steam.")
 
 
 @app.command()
 def shortcut(
+    rom_id: Annotated[int | None, typer.Argument(help="An installed game; without one, the UI")] = None,
     plan: Annotated[bool, typer.Option("--plan", help="Print what would be added; change nothing")] = False,
 ):
-    """Add a "RomM Shelf" entry to the app menu and to Steam, so it can be opened from Game Mode."""
-    import shutil
-    import subprocess
+    """Add an app menu entry and a Steam shortcut: for the UI, or for one game through `romm-shelf play`.
 
-    uv = shutil.which("uv") or str(Path("~/.local/bin/uv").expanduser())
-    project = Path(__file__).resolve().parents[2]
-    desktop = Path("~/.local/share/applications/romm-shelf.desktop").expanduser()
-    entry = (
-        "[Desktop Entry]\n"
-        "Type=Application\n"
-        "Name=RomM Shelf\n"
-        "Comment=Browse your RomM library and sync saves\n"
-        f"Exec={uv} run --project {project} romm-shelf ui\n"
-        "Icon=applications-games\n"
-        "Categories=Game;\n"
-    )
-    typer.echo(f"write {desktop}:\n{entry}")
-    typer.echo(f"steamos-add-to-steam {desktop}")
+    Installing a game (`get`, or the UI) already adds its own; this is for one installed before."""
+    if rom_id is None:
+        _steam_shortcut("romm-shelf", "RomM Shelf", "Browse your RomM library and sync saves", "ui", plan)
+        return
+    (settings, _, client, layout), local, rom = _installed(rom_id)
+    _run_plan(settings, layout, local, rom)  # refuse a game nothing here can run
+    _game_shortcut(rom, client, plan)
+
+
+def _game_shortcut(rom, client, plan: bool) -> None:
+    """The game's own Steam app, unless Steam already has it (a second one would split its profile)."""
+    name = rom.name or rom.fs_name_no_ext
+    desktop = steam.desktop_file(rom.id)
+    hit = steam.find(desktop, name)
+    if hit:
+        typer.echo(f"# Steam already has it as app {hit.appid}")
+        if not plan:
+            steam.add_game(rom.id, name, lambda: media.cover(rom, client))  # adds a missing cover
+        return
+    typer.echo(f"write {desktop}:\n{steam.game_entry(rom.id, name)}")
+    typer.echo(f"steam steam://addnonsteamgame/{desktop}")
+    if media.sources(rom).get("covers"):
+        typer.echo(f"set its Steam library cover from RomM ({name})")
     if plan:
         return
-    desktop.parent.mkdir(parents=True, exist_ok=True)
-    desktop.write_text(entry)
-    subprocess.run(["steamos-add-to-steam", str(desktop)], check=True)
-    typer.echo("# added. In Game Mode it's under Library → Non-Steam.")
+    shortcut, _ = steam.add_game(rom.id, name, lambda: media.cover(rom, client))
+    typer.echo(f"# added as Steam app {shortcut.appid}. In Game Mode it's under Library → Non-Steam.")
+
+
+def _installed(rom_id: int):
+    """(context, the local game, its RomM ROM), or a clear error.
+
+    Asks RomM for this one ROM, not the whole library: that's 0.1 s instead of several seconds,
+    and `play` runs this before the game starts."""
+    import httpx
+
+    context = _context()
+    _, _, client, layout = context
+    try:
+        rom = Rom.model_validate(client.rom_details(rom_id))
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise typer.BadParameter(f"no ROM {rom_id} in RomM")
+        raise
+    local = next((l for l, _ in match(scan_local(layout.roms), [rom]).matched), None)
+    if local is None:
+        raise typer.BadParameter(f"ROM {rom_id} is not on this device")
+    return context, local, rom
+
+
+def _run_plan(settings: Settings, layout, local, rom) -> native.RunPlan:
+    try:
+        return player.run_plan(settings, layout, local, rom)
+    except player.NotPlayable as e:
+        raise typer.BadParameter(str(e))
+
+
+@app.command()
+def play(
+    rom_id: int,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would run; change nothing")] = False,
+):
+    """Run an installed game: pull its saves, run it, push its saves. What its Steam shortcut runs."""
+    (settings, session, client, layout), local, rom = _installed(rom_id)
+    remote = [rom]  # the sync only looks at this game
+    run = _run_plan(settings, layout, local, rom)
+    if plan:
+        for line in player.plan_lines(rom, run):
+            typer.echo(line)
+        return
+    adapters = load_adapters()
+
+    def save_sync(restore: bool, what: str) -> None:
+        try:  # no network mustn't stop the game: its saves stay on disk and sync next time
+            result = sync_roms(session, client, layout, adapters, [rom_id], restore=restore, remote=remote)
+            if result.failed:
+                logger.warning("{}: {} of {} steps failed", what, result.failed, len(result.steps))
+        except Exception as e:
+            logger.warning("{} failed: {}", what, e)
+
+    save_sync(True, "pulling saves")
+    native.prepare(run)
+    for name in run.patches:  # the emulator's first setup: its default is copied, now patch it
+        failed = [r for r in patches.apply(settings, name) if r.status == "failed"]
+        if failed:
+            raise typer.Exit(f"patch {name} failed: {'; '.join(r.describe() for r in failed)}")
+    code = native.launch(run)
+    save_sync(False, "pushing saves")
+    # A game set to be in Steam only while playing had a temporary entry; take it out again.
+    key = f"{local.system}/{local.name}"
+    game = steam.Game(rom_id, rom.name or rom.fs_name_no_ext, key, steam.wanted(key))
+    for change, error in steam.execute(steam.plan([game], only={rom_id}), adds=False):
+        logger.info("{}{}", change.describe(), f" FAILED: {error}" if error else "")
+    raise typer.Exit(code)
 
 
 @app.command()
@@ -204,6 +391,12 @@ def get(
         raise typer.BadParameter(f"no ROM {rom_id} in RomM")
     p = mods.plan_install(rom, client, layout, remote)
     typer.echo(p.describe())
+    art = media.plan([(LocalRom(rom.platform_fs_slug, p.target), rom)], media.media_root(settings))
+    for f in art:
+        typer.echo(f.describe())
+    in_steam = steam.available() and steam.wanted(f"{rom.platform_fs_slug}/{p.target.name}")
+    if in_steam:
+        typer.echo(f"add {steam.desktop_file(rom_id)} to Steam as its own app, unless it's there")
     if plan:
         return
     with typer.progressbar(length=p.size, label=rom.name or rom.fs_name) as bar:
@@ -213,10 +406,17 @@ def get(
             bar.update(done - last[0])
             last[0] = done
 
-        mods.run_install(p, client, progress)
+        target = mods.run_install(p, client, progress)
+    # Planned again now the game is on disk: a folder game's files get media of their own.
+    media.fetch(media.plan([(LocalRom(rom.platform_fs_slug, target), rom)], media.media_root(settings)), client)
     result = sync_roms(session, client, layout, load_adapters(), [rom_id], restore=True, remote=remote)
     for step in result.steps:
         typer.echo(step.describe())
+    if in_steam:  # its own Steam app, so playing it is one step (design.md § Steam entries)
+        try:
+            _game_shortcut(rom, client, plan=False)
+        except steam.SteamError as e:
+            typer.echo(f"# not added to Steam: {e}. `romm-shelf shortcut {rom_id}` tries again.")
     typer.echo("# installed. Restart ES-DE to see it in the game list.")
 
 
@@ -229,11 +429,12 @@ def rm(
     settings, session, client, layout = _context()
     remote = list(client.roms())
     m = match(scan_local(layout.roms), remote)
-    local = next((l for l, r in m.matched if r.id == rom_id), None)
+    local, rom = next(((l, r) for l, r in m.matched if r.id == rom_id), (None, None))
     if local is None:
         raise typer.BadParameter(f"ROM {rom_id} is not on this device")
-    removed, kept = mods.plan_uninstall(local.path, layout, settings.fs_root)
-    for path in removed:
+    removed, kept = mods.plan_uninstall(local.path, rom, layout, settings.fs_root)
+    art = media.removal(local, rom, media.media_root(settings))
+    for path in removed + art:
         typer.echo(f"remove {path}")
     for path in kept:
         typer.echo(f"keep   {path}")
@@ -245,7 +446,174 @@ def rm(
         typer.echo("# save sync failed; not removing the game")
         raise typer.Exit(1)
     mods.uninstall(removed)
-    typer.echo("# removed. Restart ES-DE to drop it from the game list.")
+    media.remove(art)
+    for change, error in steam.execute(steam.plan([], {rom_id: rom.name or rom.fs_name_no_ext}, {rom_id})):
+        typer.echo(change.describe() + (f" FAILED: {error}" if error else ""))
+    typer.echo("# removed. Restart ES-DE to drop it from the game list"
+               + (", and Steam to drop it from the library." if steam.running() else "."))
+
+
+# Steam entries (design.md § Steam entries)
+
+steam_app = typer.Typer(no_args_is_help=True, help="Games' own entries in Steam's library.")
+app.add_typer(steam_app, name="steam")
+
+
+def _steam_games(game: str | None
+                 ) -> tuple[list[steam.Game], dict[int, str], set[int] | None,
+                            dict[int, Callable[[], tuple[str, bytes] | None]]]:
+    """(installed games, RomM's names by id, the ROMs a --game limits the plan to,
+    how to fetch each game's cover)."""
+    _, _, client, layout = _context()
+    local = list(scan_local(layout.roms))
+    # Only the platforms with installed games: matching is by roms/<fs_slug>/, and the whole list
+    # (thousands of games) took seconds every time the steam-shortcuts patch was checked. A game
+    # no longer installed on another platform keeps its Steam entry's own name.
+    systems = {r.system for r in local}
+    remote = list(client.roms(platform_ids=[p.id for p in client.platforms() if p.fs_slug in systems]))
+    found = steam.games(match(local, remote).matched)
+    only = None
+    if game is not None:
+        key = "/".join(patches.game_key(game))
+        hit = [g for g in found if g.key == key]
+        if not hit:
+            raise typer.BadParameter(f"{game} isn't an installed game RomM knows")
+        only = {hit[0].rom_id}
+    covers = {r.id: (lambda r=r: media.cover(r, client)) for r in remote}
+    return found, {r.id: r.name or r.fs_name_no_ext for r in remote}, only, covers
+
+
+def _restart_setting() -> bool:
+    return bool(patches.values(steam.SHORTCUTS_PATCH).get("restart_steam", True))
+
+
+@steam_app.command("sync")
+def steam_sync(
+    game: Annotated[str | None, typer.Option("--game", help="Only this game (SYSTEM/FILE under roms/)")] = None,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would change; change nothing")] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Print the plan as a JSON list")] = False,
+    restart_steam: Annotated[bool | None, typer.Option(
+        "--restart-steam/--no-restart-steam",
+        help="After taking entries out, restart Steam so they leave its library now "
+             "(default: the steam-shortcuts patch's setting)")] = None,
+):
+    """Add and remove games' Steam entries to match what's installed and the Steam settings.
+
+    What the steam-shortcuts and steam-shortcut-game patches run."""
+    found, names, only, covers = _steam_games(game)
+    changes = steam.plan(found, names, only)
+    if as_json:
+        typer.echo(json.dumps([c.describe() for c in changes]))
+    else:
+        for c in changes:
+            typer.echo(c.describe())
+    if plan or not changes:
+        if not as_json and not changes:
+            typer.echo("# Steam's library already matches")
+        return
+    results = steam.execute(changes, covers=covers)
+    for change, error in results:
+        if error:
+            typer.echo(f"# {change.action} {change.name} failed: {error}")
+    removed = any(c.action == "remove" and not e for c, e in results)
+    if removed and steam.running():
+        if _restart_setting() if restart_steam is None else restart_steam:
+            typer.echo(f"# restarting Steam so they leave its library: {steam.restart_later()}")
+        else:
+            typer.echo("# Steam lists the removed entries until it restarts (`romm-shelf steam restart`)")
+    if any(e for _, e in results):
+        raise typer.Exit(1)
+
+
+@steam_app.command("restart")
+def steam_restart(
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would happen; change nothing")] = False,
+    now: Annotated[bool, typer.Option("--now", hidden=True,
+                                      help="Do it in this process (what the detached unit runs)")] = False,
+):
+    """Restart Steam, taking out entries that should go while it's closed.
+
+    Steam writes its own copy of its shortcuts over the file, so an entry only leaves its library
+    once it restarts. Runs outside Steam (a systemd user unit), so the UI and games closing with
+    Steam don't stop it."""
+    found, names, _, _ = _steam_games(None)  # RomM is asked before Steam closes; afterwards only files are read
+    gone = [c for c in steam.plan(found, names) if c.action == "remove"]
+    if plan or not now:
+        typer.echo("steam -shutdown, and wait for it to close")
+        for c in gone:
+            typer.echo(c.describe())
+        typer.echo("start Steam again, unless the session already has")
+        if not plan:
+            typer.echo(f"# started: {steam.restart_later()}")
+        return
+
+    def while_closed():  # entries are read again: Steam rewrote the file as it closed
+        for change, error in steam.execute([c for c in steam.plan(found, names) if c.action == "remove"]):
+            logger.info("{}{}", change.describe(), f" FAILED: {error}" if error else "")
+    steam.restart(while_closed)
+
+
+@app.command("media")
+def media_get(
+    rom_ids: Annotated[list[int] | None, typer.Argument(help="Only these ROMs (default: every installed game)")]
+        = None,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would be changed; change nothing")] = False,
+    prune: Annotated[bool, typer.Option("--prune", help="Instead, delete media of games not on this device")]
+        = False,
+):
+    """Fetch covers, screenshots, manuals and videos from RomM for installed games ES-DE has none for."""
+    if prune:
+        settings = Settings()
+        layout = RetroDeckLayout.load(settings)
+        old = media.orphans(layout.roms, media.media_root(settings))
+        for path in old:
+            typer.echo(f"remove {path}")
+        typer.echo(f"# {len(old)} media files of games not on this device" + ("" if plan else "; removed"))
+        if not plan:
+            media.remove(old)
+        return
+    settings, session, client, layout = _context()
+    m = match(scan_local(layout.roms), client.roms())
+    games = [(l, r) for l, r in m.matched if not rom_ids or r.id in rom_ids]
+    files = media.plan(games, media.media_root(settings))
+    for f in files:
+        typer.echo(f.describe())
+    if plan or not files:
+        typer.echo(f"# {len(files)} media files to fetch" if files else "# nothing to fetch")
+        return
+    done, failed = media.fetch(files, client)
+    typer.echo(f"# fetched {done}, failed {failed}. Restart ES-DE to see them.")
+    if failed:
+        raise typer.Exit(1)
+
+
+@app.command("extras")
+def extras_cmd(
+    rom_id: int,
+    name: Annotated[str | None, typer.Argument(help="Save this one (manual, screenshot-1, video); default: list")]
+        = None,
+    out: Annotated[Path | None, typer.Option("--out", "-o", help="Where to save it (default: ./<game> - <name>)")]
+        = None,
+    plan: Annotated[bool, typer.Option("--plan", help="Print where it would be saved; write nothing")] = False,
+):
+    """A game's manual, screenshots and video on RomM: list them, or save one to look at (the UI's Extras)."""
+    _, _, client, _ = _context()
+    r = Rom.model_validate(client.rom_details(rom_id))
+    found = media.extras(r)
+    if name is None:
+        for e in found:
+            typer.echo(f"{e.name:14} {e.source}")
+        typer.echo(f"# {len(found)} extras for {r.name or r.fs_name_no_ext}" if found else "# RomM has no extras for it")
+        return
+    e = next((e for e in found if e.name == name), None)
+    if e is None:
+        typer.echo(f"no {name!r} for ROM {rom_id}; have: {', '.join(x.name for x in found) or 'nothing'}", err=True)
+        raise typer.Exit(1)
+    target = out or Path(f"{r.name or r.fs_name_no_ext} - {e.name}{e.suffix}".replace("/", "-"))
+    typer.echo(f"save {e.source} -> {target}")
+    if plan:
+        return
+    target.write_bytes(client.asset(e.source).content)
 
 
 mod_app = typer.Typer(no_args_is_help=True, help="Dolphin game mods: a descriptor, a base disc and patch folders.")
@@ -266,6 +634,69 @@ def mod_pack(
     if plan:
         return
     typer.echo(f"# packaged {mods.pack(p)}. Copy it into RomM's roms/{descriptor.absolute().parent.name}/ and rescan.")
+
+
+native_app = typer.Typer(no_args_is_help=True, help="Native games: folder ROMs that run themselves.")
+app.add_typer(native_app, name="native")
+
+
+@native_app.command("metadata")
+def native_metadata(
+    rom_id: int,
+    source: Annotated[int, typer.Option("--from", help="The ROM to copy from: the same game's Switch release")],
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would change; change nothing")] = False,
+):
+    """Copy a ROM's metadata onto a native game, which a scan can't identify. Run again after a rescan."""
+    client = load_session(Settings()).client()
+    fields = native.metadata_fields(client.rom_details(source))
+    if not fields:
+        raise typer.BadParameter(f"ROM {source} has no metadata to copy")
+    for key in fields:  # names only: a cover's URL can carry the metadata service's credentials
+        typer.echo(f"set {key} on ROM {rom_id} from ROM {source}")
+    if plan:
+        return
+    client.update_rom(rom_id, fields)
+    typer.echo(f"# copied {len(fields)} fields")
+
+
+@native_app.command("pack")
+def native_pack(
+    folder: Path,
+    squashfs: Annotated[Path, typer.Option("--squashfs", help="Write the archive here")],
+    upload: Annotated[bool, typer.Option("--upload", help="Upload it to RomM as one single-file ROM")] = False,
+    platform: Annotated[str, typer.Option(help="RomM platform fs_slug to upload to")] = proton.PLATFORM,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would be packed and uploaded; change nothing")] = False,
+):
+    """Pack a built Windows game folder, with its .ludusavi.yaml, as a squashfs for RomM.
+
+    Validates the manifest and program, then writes the archive. --upload creates the platform
+    when missing, uploads the one file and, once RomM has scanned it, applies the manifest's
+    metadata to the entry.
+    """
+    try:
+        p = proton.pack_plan(folder, squashfs)
+    except (proton.ManifestError, FileExistsError) as e:
+        raise typer.BadParameter(str(e))
+    typer.echo(p.describe())
+    if upload:
+        typer.echo(f"upload {p.output.name} to RomM platform {platform} (one file)")
+        if p.game.metadata:
+            typer.echo(f"  apply {len(p.game.metadata)} metadata fields after RomM scans it")
+    if plan:
+        return
+    with typer.progressbar(length=1, label=p.output.name) as bar:
+        proton.pack(p)
+        bar.update(1)
+    typer.echo(f"# wrote {p.output}")
+    if not upload:
+        typer.echo(f"# copy it into RomM's roms/{platform}/ on the server and rescan")
+        return
+    settings, _, client, _ = _context()
+    rom = proton.upload(p, client, platform)
+    typer.echo(f"# uploaded {p.output.name}; RomM scanned it into its library")
+    if rom is not None:
+        typer.echo(f"# applied the manifest's metadata to ROM {rom.id}")
+
 
 
 bios_app = typer.Typer(no_args_is_help=True, help="BIOS/firmware: RomM is the source of truth; devices pull.")
@@ -367,102 +798,205 @@ def bios_rm(filename: str):
         typer.echo(f"# {filename} is not on this device")
 
 
-hooks_app = typer.Typer(no_args_is_help=True, help="ES-DE hooks and the daemon's systemd unit.")
-app.add_typer(hooks_app, name="hooks")
+patches_app = typer.Typer(invoke_without_command=True,
+                          help="What romm-shelf changes on this system, applied and removed the same way.")
+app.add_typer(patches_app, name="patches")
+GAME_HELP = "A game under roms/: SYSTEM/FILE, e.g. nes/Game.nes"
+EMULATOR_HELP = "An emulator, for a per-emulator patch's value for every game it runs (e.g. mesen)"
 
 
-@app.command("patches")
-def patches_list():
-    """What romm-shelf changes on this system (ES-DE hooks, external emulators), and whether each is applied."""
+def _target(game: str | None, emulator: str | None = None) -> patches.Target | None:
+    """The target of --game/--emulator, after refreshing RomM's patches (and that game's own)."""
+    if game and emulator:
+        raise typer.BadParameter("give --game or --emulator, not both")
+    try:
+        target = patches.game_target(game) if game else patches.emulator_target(emulator) if emulator else None
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
+    _refresh(target)
+    return target
+
+
+def _refresh(target: patches.Target | None) -> None:
+    """RomM is a layer of patches (design.md § Patches, From RomM). Offline or not paired, the last
+    copies stand, and the CLI says so."""
+    try:
+        settings, session, client, layout = _context()
+        patches.refresh_firmware(client)
+        if target is not None and target.game:
+            system, file = patches.game_key(target.game)
+            m = match([LocalRom(system, layout.roms / system / file)], client.roms())
+            if m.matched:
+                patches.refresh_game(client, m.matched[0][1], target.game)
+    except (Exception, SystemExit) as e:  # not paired is a SystemExit (auth.load_session)
+        typer.echo(f"# patches from RomM not refreshed: {e}", err=True)
+
+
+def _where(game: str | None, emulator: str | None) -> str:
+    return f" --game {game}" if game else f" --emulator {emulator}" if emulator else ""
+
+
+def _for_target(name: str, target: patches.Target | None) -> patches.Target | None:
+    """Reached from a game, an emulator-scoped patch is set and run for that game's emulator."""
+    return patches.target_of(patches.find(name, target), target) if target is not None else None
+
+
+def _game_scoped() -> list[str]:
+    out = []
+    for n, p in patches.sources().items():
+        try:
+            if patches.scope(p)[0] == "game":
+                out.append(n)
+        except patches.PatchError:
+            pass  # apply/settings report the YAML error
+    return out
+
+
+def _show_patch(p: patches.Patch) -> None:
+    where = {"builtin": "", "romm": "  (from RomM)", "game": "  (the game's own, from RomM)", "user": "  (yours)"}
+    # A per-emulator patch on the full list is shown for one emulator (`--emulator`).
+    only = f" --emulator {p.target.emulator}" if p.target is not None and not p.target.game else ""
+    typer.echo(f"{p.state:8} {p.name:16} {p.title}{where[p.origin]}{f'  (for {p.target.emulator})' if only else ''}")
+    for line in p.plan if p.state != "applied" else []:
+        typer.echo(f"    {line}")
+    for s in p.settings:
+        typer.echo(f"    {s.key} = {s.value!r}")
+    if p.error:
+        typer.echo(f"    # {p.error}")
+    elif p.state != "applied":
+        typer.echo(f"    # apply with: romm-shelf patches apply {p.name}{only}")
+
+
+@patches_app.callback()
+def patches_list(
+    ctx: typer.Context,
+    game: Annotated[str | None, typer.Option("--game", help=GAME_HELP)] = None,
+    emulator: Annotated[str | None, typer.Option("--emulator", help=EMULATOR_HELP)] = None,
+):
+    """Each patch (Ansible playbooks: built in, and yours in ~/.config/romm-shelf/patches/) and its state.
+
+    With --game, that game's settings: the per-game patches for it, checked for it. With
+    --emulator, that emulator's per-emulator patches. Without either, a per-emulator patch is
+    listed once for each emulator it's for.
+    """
+    if ctx.invoked_subcommand:
+        return
     settings = Settings()
-    for p in patches.status(settings, load_session(settings).client()):
-        typer.echo(f"{p.state:12} {p.name:10} {p.title}")
-        for line in p.plan if p.state != "applied" else []:
-            typer.echo(f"    {line}")
-        if p.error:
-            typer.echo(f"    # {p.error}")
-        elif p.state != "applied":
-            typer.echo(f"    # apply with: {p.cli}")
+    if not (game or emulator):
+        _refresh(None)
+    if game or emulator:
+        target = _target(game, emulator)
+        assert target is not None
+        found = patches.for_target(settings, target)
+        for p in found:
+            _show_patch(p)
+            for s in p.settings:
+                typer.echo(f"    # {s.key}: {'set here' if s.here else f'inherited ({s.value!r})'}")
+        if not found:
+            typer.echo(f"# no per-game or per-emulator patches for {target.label()}")
+        return
+    for p in patches.status(settings):
+        _show_patch(p)
+    if scoped := _game_scoped():
+        typer.echo(f"\n# per game: {', '.join(scoped)} (romm-shelf patches --game SYSTEM/FILE)")
 
 
-@hooks_app.command("install")
-def hooks_install(
-    plan: Annotated[bool, typer.Option("--plan", help="Print the changes; make none")] = False,
-    exec_start: Annotated[str | None, typer.Option(help="Command systemd runs for the daemon")] = None,
+def _show_settings(found: list[patches.Setting]) -> None:
+    if not found:
+        typer.echo("# no settings")
+    for s in found:
+        options = f"  [{' | '.join(s.choices)}]" if s.choices else f"  ({s.type})"
+        note = "" if s.here else ("  # default" if s.value == s.default else "  # inherited")
+        typer.echo(f"{s.key} = {s.value!r}{options}{note}")
+        if s.show_if:
+            typer.echo(f"    # used when {', '.join(f'{k}={v}' for k, v in s.show_if.items())}")
+
+
+@patches_app.command("settings")
+def patches_settings(
+    name: Annotated[str, typer.Argument(help="The patch")],
+    game: Annotated[str | None, typer.Option("--game", help=GAME_HELP)] = None,
+    emulator: Annotated[str | None, typer.Option("--emulator", help=EMULATOR_HELP)] = None,
 ):
-    """Install the ES-DE game-start/game-end scripts and the daemon's user unit."""
-    changes = hooks.install_plan(Settings(), exec_start or patches.default_exec_start())
-    for c in changes:
-        typer.echo(c.describe())
-    if not plan:
-        hooks.apply(changes)
-        typer.echo("# installed")
+    """A patch's settings (x_settings in its playbook) and their values."""
+    target = _target(game, emulator)
+    try:
+        _show_settings(patches.settings(name, target=_for_target(name, target)))
+    except (KeyError, ValueError, patches.PatchError) as e:
+        raise typer.Exit(str(e))
 
 
-@hooks_app.command("remove")
-def hooks_remove(plan: Annotated[bool, typer.Option("--plan", help="Print the changes; make none")] = False):
-    """Undo `hooks install`. Only files romm-shelf wrote are removed."""
-    changes = hooks.remove_plan(Settings())
-    for c in changes:
-        typer.echo(c.describe())
-    if not plan:
-        hooks.apply(changes)
-        typer.echo("# removed")
-
-
-external_app = typer.Typer(no_args_is_help=True,
-                           help="External emulators: AppImages kept in RomM, run inside RetroDECK via ES-DE.")
-app.add_typer(external_app, name="external")
-
-
-def _external(name: str) -> external.External:
-    known = external.load_externals()
-    if name not in known:
-        raise SystemExit(f"unknown external {name!r}; known: {', '.join(sorted(known)) or 'none'}")
-    return known[name]
-
-
-@external_app.command("list")
-def external_list():
-    """Known externals and the AppImage RomM has for each."""
-    client = load_session(Settings()).client()
-    firmware, platforms = client.firmware(), {p.fs_slug: p.id for p in client.platforms()}
-    for ext in external.load_externals().values():
-        fw = external.newest_appimage(ext, firmware, platforms)
-        typer.echo(f"{ext.name:10} {ext.platform:10} {fw['file_name'] if fw else '(not in RomM: ' + ext.pattern + ')'}")
-
-
-@external_app.command("install")
-def external_install(
-    name: str,
-    plan: Annotated[bool, typer.Option("--plan", help="Print the changes; make none")] = False,
+@patches_app.command("set")
+def patches_set(
+    name: Annotated[str, typer.Argument(help="The patch")],
+    values: Annotated[list[str] | None, typer.Argument(help="KEY=VALUE, one or more")] = None,
+    game: Annotated[str | None, typer.Option("--game", help=GAME_HELP)] = None,
+    emulator: Annotated[str | None, typer.Option("--emulator", help=EMULATOR_HELP)] = None,
+    unset: Annotated[list[str] | None, typer.Option("--unset", help="A setting to clear (repeatable)")] = None,
 ):
-    """Install or update NAME from the newest matching AppImage in RomM, and make it ES-DE's default."""
+    """Change a patch's settings. Nothing changes on the system until `patches apply NAME`."""
+    changes = {}
+    for v in values or []:
+        key, sep, value = v.partition("=")
+        if not sep:
+            raise typer.BadParameter(f"{v!r}: expected KEY=VALUE")
+        changes[key.strip()] = value
+    for key in unset or []:
+        changes[key.strip()] = None
+    if not changes:
+        raise typer.BadParameter("give KEY=VALUE, or --unset KEY")
+    target = _target(game, emulator)
+    try:
+        _show_settings(patches.save_settings(name, changes, _for_target(name, target)))
+    except (KeyError, ValueError, patches.PatchError) as e:
+        raise typer.Exit(str(e))
+    typer.echo(f"# see the change with: romm-shelf patches apply {name}{_where(game, emulator)} --plan")
+
+
+def _show(result: patches.TaskResult, diff: bool) -> None:
+    if result.status == "skipped" or not (result.changed or result.status != "ok"):
+        return
+    typer.echo(f"{'changed' if result.status == 'ok' else result.status:8} {result.describe()}")
+    for d in result.diff if diff else []:
+        if "before" in d or "after" in d:
+            import difflib
+            typer.echo("".join(difflib.unified_diff(
+                str(d.get("before", "")).splitlines(True), str(d.get("after", "")).splitlines(True),
+                d.get("before_header", "before"), d.get("after_header", "after"))).rstrip("\n"))
+
+
+@patches_app.command("apply")
+def patches_apply(
+    name: Annotated[str | None, typer.Argument(help="One patch; without one, all of them")] = None,
+    plan: Annotated[bool, typer.Option("--plan", help="Check mode: print the changes with diffs; make none")] = False,
+    game: Annotated[str | None, typer.Option("--game", help=GAME_HELP)] = None,
+    emulator: Annotated[str | None, typer.Option("--emulator", help=EMULATOR_HELP)] = None,
+):
+    """Apply patches (ansible-playbook on this machine). There is no remove: patches only converge.
+
+    Without --game or --emulator this applies the system patches (a per-emulator one for every
+    emulator). With --game: one patch for that game, or without a name every per-game patch
+    for it. With --emulator, likewise for that emulator.
+    """
     settings = Settings()
-    ext = _external(name)
-    client = load_session(settings).client()
-    steps = external.install_plan(settings, ext, client.firmware(), {p.fs_slug: p.id for p in client.platforms()})
-    for s in steps:
-        typer.echo(s.describe())
-    if not steps:
-        typer.echo(f"# {name} is installed and current")
-    elif not plan:
-        external.apply(steps, client, ext.process)
-        typer.echo(f"# installed. Restart ES-DE to use {ext.es_label} for {ext.platform}.")
-
-
-@external_app.command("remove")
-def external_remove(
-    name: str,
-    plan: Annotated[bool, typer.Option("--plan", help="Print the changes; make none")] = False,
-):
-    """Undo `external install NAME`. Saves, keys and firmware stay where they are."""
-    steps = external.remove_plan(Settings(), _external(name))
-    for s in steps:
-        typer.echo(s.describe())
-    if steps and not plan:
-        external.apply(steps)
-        typer.echo("# removed. Restart ES-DE.")
+    target = _target(game, emulator)
+    try:
+        if name:
+            names = [name]
+        elif target is not None:
+            names = [p.name for p in patches.listing_for_target(settings, target)]
+        else:
+            names = [n for n in patches.sources() if n not in _game_scoped()]
+        for n in names:
+            typer.echo(f"# {n}")
+            results = patches.apply(settings, n, check_only=plan, target=target,
+                                    on_task=lambda r: _show(r, plan))
+            if any(r.status in ("failed", "unreachable") for r in results):
+                raise typer.Exit(1)
+            if not any(r.changed for r in results):
+                typer.echo("# nothing to do")
+    except (KeyError, patches.PatchError) as e:
+        raise typer.Exit(str(e))
 
 
 @app.command()

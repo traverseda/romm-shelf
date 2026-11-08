@@ -14,11 +14,13 @@ synced; see todo.md.
 """
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from romm_shelf.adapters import DiscReader, LocalSave
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom
+from romm_shelf.native import RunPlan
 from romm_shelf.romm import Rom
 
 EMULATOR = "pcsx2"
@@ -90,3 +92,50 @@ class Pcsx2Adapter:
     def target_path(self, rom: LocalRom, layout: RetroDeckLayout, kind: str, file_name: str,
                     slot: str | None = None) -> Path | None:
         return None  # restore_path places it, from RomM's title_id
+
+
+# The bundled emulator (design.md § Bundled emulators), in the romm_shelf.emulators entry-point
+# group. packaging/emulators.nix bundles it as pcsx2/: bin/pcsx2-qt, lib/ and default.ini.
+
+# Which file in a folder ROM to start, best first.
+LAUNCHABLE = (".m3u", ".chd", ".iso", ".cue", ".bin")
+
+
+def user_dir() -> Path:
+    """PCSX2's data folder. `-datapath` points at its parent; PCSX2 appends `PCSX2/`."""
+    from romm_shelf.emulators import emulator_home
+    return emulator_home() / "PCSX2"
+
+
+@dataclass(frozen=True)
+class Pcsx2Emulator:
+    """Standalone PCSX2, for PlayStation 2 discs."""
+
+    name: str = "pcsx2"
+    systems: tuple[str, ...] = ("ps2",)
+    patches: tuple[str, ...] = ("pcsx2",)
+    """Run on top of the default when PCSX2 is first set up (design.md § Patches)."""
+
+    def run_plan(self, rom: LocalRom, layout: RetroDeckLayout, bundle: Path, runtime: Path) -> RunPlan:
+        from romm_shelf.emulators import content, local_program, steam_overlay_libs
+        from romm_shelf.patches import SETTINGS_PATCH, values
+        chosen = values(SETTINGS_PATCH)
+        game = content(rom, LAUNCHABLE)
+        if chosen.get("pcsx2") == "external":
+            program, extra = local_program(chosen, "pcsx2_command", "pcsx2-qt")
+            return RunPlan(program, (*extra, "-nogui", "-fullscreen", "--", str(game)), {},
+                           rom.path.parent, seed={})
+        pcsx2 = bundle / "pcsx2"
+        program = pcsx2 / "bin/pcsx2-qt"
+        if not program.exists():
+            raise FileNotFoundError(f"{self.name}: {program} isn't in the bundle")
+        data = user_dir()
+        config = data / "inis/PCSX2.ini"
+        # -nogui implies batch: no main window, and PCSX2 exits when the game stops.
+        args = ("-datapath", str(data.parent), "-nogui", "-fullscreen", "--", str(game))
+        seed = {} if config.exists() else {config: (pcsx2 / "default.ini").read_bytes()}
+        return RunPlan(program, args, steam_overlay_libs(pcsx2), rom.path.parent,
+                       seed=seed, patches=self.patches if seed else ())
+
+
+PCSX2 = Pcsx2Emulator()

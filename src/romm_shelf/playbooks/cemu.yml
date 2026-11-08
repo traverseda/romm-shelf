@@ -1,0 +1,71 @@
+# Cemu for every game: Vulkan, fullscreen, no update checks, and the MLC folder in the save
+# layout (design.md § Bundled emulators, Cemu). The controller profiles are seeded on the first
+# run; this patch changes settings.xml, key by key.
+#
+# ansible.builtin only. Cemu's settings.xml has <api> under both Graphic and Audio, so the
+# renderer is changed only after the Graphic section.
+- name: Cemu settings
+  hosts: all  # a scoped patch runs for its targets, one host each
+  gather_facts: false
+  vars:
+    x_scope: emulator
+    x_emulators: [cemu]
+    x_settings:
+      vsync:
+        title: VSync
+        description: >-
+          Cemu's vertical sync. Off is Cemu's default and usually gives the lowest latency.
+        default: false
+    external: "{{ cemu == 'external' }}"
+    target: "{{ cemu_local_config | expanduser if external else cemu_config }}"
+    config: "{{ target }}/settings.xml"
+    mlc: "{{ saves }}/wiiu/cemu/mlc01"
+    save_root: "{{ mlc }}/usr/save/00050000"
+    settings:
+      - {key: mlc_path, value: "{{ mlc }}"}
+      - {key: fullscreen, value: "true"}
+      - {key: check_update, value: "false"}
+      - {key: use_discord_presence, value: "false"}
+  tasks:
+    - name: Find Cemu's config
+      ansible.builtin.stat:
+        path: "{{ config }}"
+      register: config_file
+
+    - name: Make the MLC folders
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: ["{{ mlc }}", "{{ save_root }}"]
+      when: config_file.stat.exists
+
+    - name: Config settings
+      ansible.builtin.lineinfile:
+        path: "{{ config }}"
+        regexp: '^\s*<{{ item.key | regex_escape }}>.*</{{ item.key | regex_escape }}>$'
+        line: "    <{{ item.key }}>{{ item.value }}</{{ item.key }}>"
+        insertbefore: '^\s*</content>\s*$'
+        create: true
+        mode: "0644"
+      loop: "{{ settings }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: config_file.stat.exists
+
+    - name: VSync
+      ansible.builtin.lineinfile:
+        path: "{{ config }}"
+        regexp: '^\s*<VSync>.*</VSync>$'
+        line: "        <VSync>{{ '1' if vsync else '0' }}</VSync>"
+        insertafter: '^\s*<Graphic>\s*$'
+        create: true
+        mode: "0644"
+      when: config_file.stat.exists
+
+    - name: Vulkan renderer
+      ansible.builtin.replace:
+        path: "{{ config }}"
+        regexp: '(?s)(<Graphic>\s*<api>)[^<]*(</api>)'
+        replace: '\g<1>1\g<2>'
+      when: config_file.stat.exists

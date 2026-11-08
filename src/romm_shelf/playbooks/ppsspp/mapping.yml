@@ -1,0 +1,30 @@
+# PPSSPP's controller mapping. Steam Input is the only source of pads, and Steam's first pad is
+# player 1 (design.md § Controller rule): PPSSPP's SDL device 0 is DEVICE_ID_PAD_0 (10), the first
+# pad SDL sees. Face buttons are positional, so Steam Input's own Nintendo/Xbox layout switch
+# changes nothing here. L2/R2 are alternatives to L1/R1; L3+R3 exits the app (with
+# --pause-menu-exit and no exit confirmation, so Steam gets the process back and play can push).
+#
+# Format is <device>-<NKCODE>, an axis as 4000 + axis * 2 + direction (1 is negative), and a combo
+# with ":" between its parts.
+bindings:
+  Up: "10-19"
+  Down: "10-20"
+  Left: "10-21"
+  Right: "10-22"
+  Circle: "10-190"
+  Cross: "10-189"
+  Square: "10-191"
+  Triangle: "10-188"
+  Start: "10-197"
+  Select: "10-196"
+  L: "10-193,10-4008"
+  R: "10-192,10-4010"
+  An.Up: "10-4003"
+  An.Down: "10-4002"
+  An.Left: "10-4001"
+  An.Right: "10-4000"
+  RightAn.Up: "10-4007"
+  RightAn.Down: "10-4006"
+  RightAn.Left: "10-4005"
+  RightAn.Right: "10-4004"
+  Exit App: "10-106:10-107"

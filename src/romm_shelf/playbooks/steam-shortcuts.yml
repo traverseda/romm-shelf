@@ -1,0 +1,50 @@
+# Installed games' own entries in Steam's library (design.md § Steam entries). On, every installed
+# game has one; off, a game is added only while it's played from romm-shelf. Uninstalled games'
+# entries are taken out either way. A running Steam only lets go of an entry when it restarts.
+- name: Games in Steam's library
+  hosts: localhost
+  gather_facts: false
+  vars:
+    x_settings:
+      steam_shortcuts:
+        title: Keep installed games in Steam
+        description: >-
+          On, every installed game has its own entry in Steam's library. Off, Play adds one when
+          you start the game and it's taken out afterwards. Either way the game keeps its Steam
+          Input profile, because Steam files that under the game's name. A game's own settings
+          can override this.
+        default: true
+      restart_steam:
+        title: Restart Steam to take entries out
+        description: >-
+          Steam only lets go of a removed entry when it restarts. On, applying this patch restarts
+          Steam when an entry was taken out, and the UI closes with it. Off, they go the next time
+          Steam starts.
+        default: true
+  tasks:
+    # romm-shelf works the plan out itself: from shortcuts.vdf, the installed games and these
+    # settings. Nothing records which entries it added.
+    - name: What has to change in Steam's library
+      ansible.builtin.command:
+        argv: ["{{ romm_shelf }}", steam, sync, --plan, --json]
+      check_mode: false
+      changed_when: false
+      register: plan
+
+    - name: Steam's library
+      ansible.builtin.debug:
+        msg: "{{ item }}"
+      loop: "{{ plan.stdout | from_json }}"
+      changed_when: true
+      when: ansible_check_mode
+
+    - name: Bring Steam's library in line
+      ansible.builtin.command:
+        argv:
+          - "{{ romm_shelf }}"
+          - steam
+          - sync
+          - "{{ '--restart-steam' if restart_steam | bool else '--no-restart-steam' }}"
+      when:
+        - not ansible_check_mode
+        - plan.stdout | from_json | length > 0
