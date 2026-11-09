@@ -323,14 +323,20 @@ def ui():
 
 def _steam_shortcut(file: str, name: str, comment: str, command: str, plan: bool) -> None:
     desktop = steam.APPLICATIONS / f"{file}.desktop"
+    if found := steam.find(desktop, name):
+        typer.echo(f"# Steam already has it as app {found.appid}")
+        return
     entry = steam.entry_text(name, command, comment)
     typer.echo(f"write {desktop}:\n{entry}")
     typer.echo(f"steam steam://addnonsteamgame/{desktop}")
     if plan:
         return
     steam.write_desktop(desktop, entry)
-    steam.add(desktop)
-    typer.echo("# added. In Game Mode it's under Library → Non-Steam.")
+    try:
+        shortcut = steam.ensure(desktop, name)
+    except steam.SteamError as e:
+        raise typer.Exit(str(e))
+    typer.echo(f"# added as Steam app {shortcut.appid}. In Game Mode it's under Library → Non-Steam.")
 
 
 @app.command()
