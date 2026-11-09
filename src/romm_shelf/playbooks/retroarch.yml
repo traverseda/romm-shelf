@@ -23,9 +23,10 @@
       input_player2_joypad_index: "1"
       input_player3_joypad_index: "2"
       input_player4_joypad_index: "3"
-      # Remaps belong to Steam Input.
-      input_remap_binds_enable: "false"
-      auto_remaps_enable: "false"
+      # Remap files are read, but romm-shelf writes only the console-wide Nintendo layout
+      # (patch nintendo-layout); anything else belongs to Steam Input.
+      input_remap_binds_enable: "true"
+      auto_remaps_enable: "true"
       input_menu_toggle_gamepad_combo: "2"  # L3 + R3
       # GameMode's governor and split-lock helpers go through pkexec, which asks for a password
       # when the user isn't in the gamemode group. Steam runs the session already.

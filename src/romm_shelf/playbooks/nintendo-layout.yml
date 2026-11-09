@@ -1,0 +1,69 @@
+# The NES's face buttons on a modern pad: A (jump in Super Mario Bros. 3) at the bottom, B (run)
+# to its left, the way a Nintendo console's diamond sits under the thumb. The SNES needs nothing:
+# RetroArch's RetroPad already puts the SNES B (jump in Super Mario World) at the bottom, A to the
+# right, Y left, X on top. Written as a core remap file, which RetroArch applies after Steam
+# Input's pad, so the order and the pad itself stay Steam's (design.md § Controller rule).
+# A remap saved from RetroArch's own menu has no marker and is never touched.
+- name: Nintendo button layout
+  hosts: localhost
+  gather_facts: false
+  vars:
+    x_settings:
+      nes_layout:
+        title: NES buttons
+        description: >-
+          A (jump) at the bottom and B (run) to its left. Turn it off to take romm-shelf's remap out
+          and leave RetroArch's default, where A is on the right. The SNES already has B at the
+          bottom.
+        default: true
+    marker: "# Managed by romm-shelf (patch nintendo-layout); turn NES buttons off and apply to take it out."
+    remap: "{{ retroarch_config | dirname }}/config/remaps/Mesen/Mesen.rmp"
+    # The key is the pad's button (RetroPad names, south is b); the value is the button the core
+    # sees: 0 is the NES B, 8 the NES A. South and north send A, west and east send B.
+    content: |
+      {{ marker }}
+      input_player1_btn_b = "8"
+      input_player1_btn_x = "8"
+      input_player1_btn_y = "0"
+      input_player1_btn_a = "0"
+      input_player2_btn_b = "8"
+      input_player2_btn_x = "8"
+      input_player2_btn_y = "0"
+      input_player2_btn_a = "0"
+      input_player3_btn_b = "8"
+      input_player3_btn_x = "8"
+      input_player3_btn_y = "0"
+      input_player3_btn_a = "0"
+      input_player4_btn_b = "8"
+      input_player4_btn_x = "8"
+      input_player4_btn_y = "0"
+      input_player4_btn_a = "0"
+    existing: "{{ lookup('ansible.builtin.file', remap, errors='ignore') | default('', true) }}"
+  tasks:
+    - name: Find RetroArch's config
+      ansible.builtin.stat:
+        path: "{{ retroarch_config }}"
+      register: config
+
+    - name: Make the remap folder
+      ansible.builtin.file:
+        path: "{{ remap | dirname }}"
+        state: directory
+        mode: "0755"
+      when: config.stat.exists and nes_layout | bool
+
+    - name: Write the NES remap
+      ansible.builtin.copy:
+        dest: "{{ remap }}"
+        content: "{{ content }}"
+        mode: "0644"
+      when:
+        - config.stat.exists
+        - nes_layout | bool
+        - existing == '' or marker in existing
+
+    - name: Take the NES remap out
+      ansible.builtin.file:
+        path: "{{ remap }}"
+        state: absent
+      when: not nes_layout | bool and marker in existing

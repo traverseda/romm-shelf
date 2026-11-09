@@ -777,10 +777,10 @@ def test_retroarch_patch_enforces_steam_input_and_save_folders(home, settings, l
     results = patches.apply(settings, "retroarch")
     assert not [r for r in results if r.status == "failed"]
     cfg = parse(config.read_text())
-    # Controller rule: SDL2 (never udev), player N = Steam's controller N, no remaps.
+    # Controller rule: SDL2 (never udev), player N = Steam's controller N, remap files read (only nintendo-layout writes one).
     assert cfg["input_joypad_driver"] == "sdl2"
     assert [cfg[f"input_player{n}_joypad_index"] for n in range(1, 5)] == ["0", "1", "2", "3"]
-    assert cfg["input_remap_binds_enable"] == "false" and cfg["auto_remaps_enable"] == "false"
+    assert cfg["input_remap_binds_enable"] == "true" and cfg["auto_remaps_enable"] == "true"
     assert cfg["input_autodetect_enable"] == "true"
     # GameMode would ask for a password through pkexec; Steam already runs the session.
     assert cfg["gamemode_enable"] == "false"

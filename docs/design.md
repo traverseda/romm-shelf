@@ -45,7 +45,8 @@ The rest of this document follows from that rule:
 - Player N is the Nth controller as Steam orders them, with no per-emulator
   remapping of which pad is which. Changing the order is done in Steam's own menu.
 - Button layout comes from Steam Input too: an emulator gets one standard gamepad
-  mapping, and per-game remaps are Steam Input configs, not emulator settings.
+  mapping, and per-game remaps are Steam Input configs, not emulator settings. The one
+  console-wide exception is the NES (below): the owner wants A (jump) at the bottom there.
 - The one exception so far is motion: Steam's virtual pads carry none, so gyro
   comes from the `gyro` DSU server (§ Gyro).
 
@@ -1157,6 +1158,10 @@ bundled ansible-core. They are how romm-shelf changes config files. Being built.
   - `dolphin-game`: the same choices for one game, over `dolphin`'s.
   - `crt-shader`: a CRT shader on the CRT-era home consoles (below).
   - `crt-shader-game`: one game's shader, overriding that console's choice (below).
+  - `nintendo-layout`: the NES's A (jump) at the bottom and B (run) to its left, as a
+    RetroArch core remap file for Mesen, on by default (*owner request 2026-11-08*). The SNES
+    needs none: RetroPad B, the SNES B, is already the bottom button. Only the pad's buttons
+    are remapped; which pad is player N stays Steam's.
 
 ### Settings
 
