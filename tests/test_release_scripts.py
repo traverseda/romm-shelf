@@ -19,6 +19,13 @@ SCRIPTS = [
 ]
 
 
+def version() -> str:
+    for line in (ROOT / "pyproject.toml").read_text().splitlines():
+        if line.startswith("version = "):
+            return line.split('"')[1]
+    raise AssertionError("no version in pyproject.toml")
+
+
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
 def test_shell_script_parses(script):
     subprocess.run(["bash", "-n", str(script)], check=True)
@@ -30,7 +37,7 @@ def test_release_plan_writes_nothing(tmp_path):
     result = subprocess.run(
         ["bash", str(ROOT / "scripts" / "release.sh"), "--plan"],
         cwd=ROOT,
-        env={**os.environ, "DIST_DIR": str(tmp_path), "GITHUB_REF_NAME": "v0.1.0"},
+        env={**os.environ, "DIST_DIR": str(tmp_path), "GITHUB_REF_NAME": f"v{version()}"},
         capture_output=True,
         text=True,
         check=True,
@@ -56,6 +63,6 @@ def test_publish_packs_plan_names_every_pack(tmp_path):
     )
 
     assert "Publish emulator packs plan (changes nothing)" in result.stdout
-    assert "ghcr.io/example/romm-shelf-pack-retroarch:0.1.0" in result.stdout
-    assert "ghcr.io/example/romm-shelf-pack-dolphin:0.1.0" in result.stdout
+    assert f"ghcr.io/example/romm-shelf-pack-retroarch:{version()}" in result.stdout
+    assert f"ghcr.io/example/romm-shelf-pack-dolphin:{version()}" in result.stdout
     assert list(tmp_path.iterdir()) == []
