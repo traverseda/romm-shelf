@@ -601,8 +601,23 @@ def run_plan(settings, layout: RetroDeckLayout, path: Path,
         }
     else:
         home = Path.home()
+        runner = native_runner()
+        runtime = Path(runner[0]) if runner else None
+        if runtime is not None and runtime.is_absolute() and \
+                runtime.parent.name.startswith("SteamLinuxRuntime"):
+            # pressure-vessel does not expose XDG_RUNTIME_DIR, so the mounted archive and the
+            # game dir are invisible to the game unless they are passed through. And the profile
+            # is bound over $HOME below, which hides a runtime installed there: stage it outside
+            # $HOME so the exec finds it.
+            base = runtime_dir() / platform / key
+            if runtime.resolve().is_relative_to(home.resolve()):
+                staged = base / "runtime"
+                args += ["--bind", str(runtime.parent), str(staged)]
+                runtime = staged / runtime.name
+                dirs.append(staged)
+            runner = [str(runtime), f"--filesystem={base}", *runner[1:]]
         args += ["--bind", str(profile), str(home)]
-        command = [*native_runner(), f"{game_dir_path}/{program}", *game.args]
+        command = [*runner, f"{game_dir_path}/{program}", *game.args]
         # These point inside the bound profile, so a game that honours XDG writes there too.
         env = {
             "HOME": str(home),
@@ -611,6 +626,10 @@ def run_plan(settings, layout: RetroDeckLayout, path: Path,
             "XDG_CACHE_HOME": str(home / ".cache"),
             "XDG_STATE_HOME": str(home / ".local/state"),
         }
+        if program.lower().endswith(".appimage"):
+            # An AppImage mounts itself with FUSE, which bwrap's user namespace and
+            # pressure-vessel's NoNewPrivs both break. Extract and run it instead.
+            env["APPIMAGE_EXTRACT_AND_RUN"] = "1"
 
     args += ["--chdir", f"{game_dir_path}/{workdir}" if workdir else str(game_dir_path),
              "--", *command]

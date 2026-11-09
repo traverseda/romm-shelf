@@ -33,6 +33,16 @@ Test Game:
 """
 
 
+APPIMAGE_MANIFEST = """\
+Test Game:
+  romm-shelf:
+    program: Game/Game.AppImage
+  files:
+    "<base>/save":
+      tags: [save]
+"""
+
+
 def archive(layout, name: str = "Test Game", data: bytes = b"not really squashfs") -> Path:
     return touch(layout.roms / "linux" / f"{name}{proton.SUFFIX}", data)
 
@@ -89,7 +99,45 @@ def test_linux_run_plan_overlays_the_archive_and_binds_the_profile(monkeypatch, 
     assert "steam-run" in run.args
     assert f"{proton.game_dir('Test Game', proton.LINUX)}/Game/Game" in run.args
     assert not any(key.startswith("STEAM_COMPAT") for key in run.env)
+    assert "APPIMAGE_EXTRACT_AND_RUN" not in run.env
     assert run.env["XDG_DATA_HOME"] == str(Path.home() / ".local/share")
+
+
+def test_an_appimage_program_is_extracted_and_run(monkeypatch, layout, tmp_path):
+    fake_manifest(monkeypatch, APPIMAGE_MANIFEST)
+    path = archive(layout)
+    tools = {name: touch(tmp_path / "bin" / name) for name in
+             ("bwrap", "squashfuse", "fusermount3", "unsquashfs", "mksquashfs")}
+    monkeypatch.setattr(proton, "tool", lambda name: tools[name])
+    monkeypatch.setattr(proton, "native_runner", lambda: ["steam-run"])
+
+    run = proton.run_plan(None, layout, path, platform=proton.LINUX)
+    assert run.env["APPIMAGE_EXTRACT_AND_RUN"] == "1"
+    assert f"{proton.game_dir('Test Game', proton.LINUX)}/Game/Game.AppImage" in run.args
+
+
+def test_a_steam_linux_runtime_under_home_is_staged_outside_the_profile(
+        monkeypatch, layout, tmp_path):
+    fake_manifest(monkeypatch)
+    path = archive(layout)
+    tools = {name: touch(tmp_path / "bin" / name) for name in
+             ("bwrap", "squashfuse", "fusermount3", "unsquashfs", "mksquashfs")}
+    monkeypatch.setattr(proton, "tool", lambda name: tools[name])
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    runtime = touch(home / ".steam/root/steamapps/common/SteamLinuxRuntime_sniper/run")
+    monkeypatch.setattr(proton, "native_runner", lambda: [str(runtime), "--"])
+    run_dir = tmp_path / "run"
+    monkeypatch.setattr(proton, "runtime_dir", lambda: run_dir)
+
+    run = proton.run_plan(None, layout, path, platform=proton.LINUX)
+    base = run_dir / "linux/Test Game"
+    staged = base / "runtime/run"
+    assert str(staged) in run.args and base / "runtime" in run.dirs
+    assert f"--filesystem={base}" in run.args
+    assert str(runtime) not in run.args
+    # The runtime is bound before the profile replaces $HOME, or it would vanish with it.
+    assert run.args.index(str(runtime.parent)) < run.args.index(str(home))
 
 
 def test_a_native_runner_can_be_overridden(monkeypatch):
