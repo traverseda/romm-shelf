@@ -26,6 +26,16 @@ def launches_directly(local: LocalRom) -> bool:
     return local.system == proton.PLATFORM and proton.is_game(local.path)
 
 
+def emulator_label(local: LocalRom, known: list[emulators.Emulator] | None = None) -> str:
+    """What a game's Steam title calls the thing that runs it: its emulator, or native/proton."""
+    if local.system == native.PLATFORM and (native.is_game(local.path) or native.is_archive(local.path)):
+        return native.EMULATOR
+    if local.system == proton.PLATFORM and proton.is_game(local.path):
+        return proton.EMULATOR
+    emulator = emulators.emulator_for(local, known)
+    return emulator.name if emulator is not None else local.system
+
+
 def run_plan(settings: Settings, layout: RetroDeckLayout, local: LocalRom) -> RunPlan:
     """A native game runs itself; anything else runs in its bundled emulator."""
     if local.system == native.PLATFORM:

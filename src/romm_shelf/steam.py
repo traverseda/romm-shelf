@@ -12,6 +12,7 @@ Nothing is recorded: the desktop file and Steam's own shortcuts.vdf are the sour
 import os
 import re
 import shutil
+import socket
 import struct
 import subprocess
 import time
@@ -74,6 +75,20 @@ def entry_text(name: str, command: str, comment: str) -> str:
 def write_desktop(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
+
+
+def host_name() -> str:
+    """This machine's name, the last part of a game's Steam title."""
+    return socket.gethostname()
+
+
+def display_name(name: str, emulator: str, hostname: str | None = None) -> str:
+    """A game's Steam title: `<game> - <emulator> - <host>` (design.md § Steam entries).
+
+    Steam never merges one game's shortcut on two machines: each host publishes its own
+    playable list, and a streamed tile keeps the host's appid. The title is what tells the
+    local tile from the streamed one."""
+    return f"{name} - {emulator} - {hostname or host_name()}"
 
 
 def available() -> bool:
@@ -243,8 +258,10 @@ def add_game(rom_id: int, name: str,
              ) -> tuple[Shortcut, bool]:
     """The game's own Steam app (`romm-shelf play <rom>`), added if it isn't there: (shortcut, added).
 
-    Installing a game calls this, so Play only has to open it. Each game is its own app, so Steam
-    keeps a Steam Input profile, playtime and artwork per game. `fetch_cover` supplies RomM's cover
+    `name` is the full title (`<game> - <emulator> - <host>`, `display_name`). Installing a game
+    calls this, so Play only has to open it. Each game is its own app, so Steam keeps a Steam Input
+    profile, playtime and artwork per game. An entry that already exists is kept as it is; a title
+    change is `steam sync`'s (it has the restart flow). `fetch_cover` supplies RomM's cover
     (suffix, bytes) for the library grid; it's only called when Steam has no cover yet.
     """
     desktop = desktop_file(rom_id)
@@ -327,26 +344,36 @@ def wanted(key: str) -> bool:
     return bool(patches.values(SHORTCUTS_PATCH).get("steam_shortcuts", True))
 
 
-def games(matched) -> list[Game]:
-    """Installed games, from library matching's (LocalRom, Rom) pairs."""
+def games(matched, label: Callable[[Any], str] | None = None) -> list[Game]:
+    """Installed games, from library matching's (LocalRom, Rom) pairs.
+
+    The title names the emulator and this machine; `label` is `player.emulator_label`, which is
+    imported here so `proton` (which imports this module) can load first."""
+    if label is None:
+        from romm_shelf import emulators, player
+        known = emulators.load_emulators()
+        label = lambda local: player.emulator_label(local, known)
     out = []
     for local, rom in matched:
         key = f"{local.system}/{local.name}"
-        out.append(Game(rom.id, rom.name or rom.fs_name_no_ext, key, wanted(key)))
+        out.append(Game(rom.id, display_name(rom.name or rom.fs_name_no_ext, label(local)),
+                        key, wanted(key)))
     return out
 
 
 @dataclass
 class Change:
-    action: Literal["add", "remove"]
+    action: Literal["add", "remove", "rename"]
     rom_id: int
     name: str
     why: str
     entry: Entry | None = None
-    """For a removal: the entry that goes."""
+    """For a removal or rename: the entry it applies to."""
 
     def describe(self) -> str:
         where = f" (Steam app {self.entry.appid})" if self.entry else ""
+        if self.action == "rename" and self.entry is not None:
+            return f"rename {self.entry.name} -> {self.name}{where}"
         return f"{self.action} {self.name}{where}: {self.why}"
 
 
@@ -369,6 +396,9 @@ def plan(games: list[Game], roms: dict[int, str] | None = None, only: set[int] |
             changes.append(Change("remove", e.rom_id, name, "set to be in Steam only while playing", e))
         elif e.rom_id in seen:
             changes.append(Change("remove", e.rom_id, name, "a second entry for the same game", e))
+        elif e.name != game.name:
+            changes.append(Change("rename", e.rom_id, game.name,
+                                  "the title names its emulator and host", e))
         seen.add(e.rom_id)
     for g in games:
         if g.wanted and g.rom_id not in seen and (only is None or g.rom_id in only):
@@ -398,11 +428,44 @@ def remove(gone: list[Entry], roots: tuple[Path, ...] | None = None) -> None:
             desktop_file(e.rom_id).unlink(missing_ok=True)
 
 
+def rename(titled: list[tuple[Entry, str]]) -> None:
+    """Give entries new display names, keeping every other byte (the appid, and so its artwork and
+    playtime, stays). A running Steam writes its own copy over the file, so the new name takes
+    effect when it restarts; `steam restart` applies the renames again while it is closed."""
+    by_file: dict[Path, dict[int, str]] = {}
+    for e, name in titled:
+        by_file.setdefault(e.file, {})[e.appid] = name
+    for path, names in by_file.items():
+        items, tail = _raw(path)
+        top_kind, top_key, shortcuts = items[0]
+        changed = []
+        for entry_kind, key, fields in shortcuts:
+            appid = next((struct.unpack("<I", value)[0] for kind, field, value in fields
+                          if field == "appid" and kind == 0x02), None)
+            wanted = names.get(appid) if appid is not None else None
+            if wanted is None:
+                changed.append((entry_kind, key, fields))
+                continue
+            stamped, found = [], False
+            for kind, field, value in fields:
+                if field == "AppName":
+                    stamped.append((kind, field, wanted.encode()))
+                    found = True
+                else:
+                    stamped.append((kind, field, value))
+            if not found:
+                stamped.insert(0, (0x01, "AppName", wanted.encode()))
+            changed.append((entry_kind, key, stamped))
+        tmp = path.with_name(path.name + ".romm-shelf")
+        tmp.write_bytes(_dump([(top_kind, top_key, changed)]) + tail)
+        tmp.replace(path)
+
+
 def execute(changes: list[Change], adds: bool = True,
             covers: dict[int, Callable[[], tuple[str, bytes] | None]] | None = None
             ) -> list[tuple[Change, str | None]]:
-    """Carry out a plan: (change, error or None) for each. Removals first, all in one write per
-    file. Adding needs the running client, so without Steam an add fails and says so.
+    """Carry out a plan: (change, error or None) for each. Removals, then renames, all in one write
+    per file. Adding needs the running client, so without Steam an add fails and says so.
     `covers` gives each added game's RomM cover, by ROM id."""
     out: list[tuple[Change, str | None]] = []
     gone = [c for c in changes if c.action == "remove"]
@@ -412,6 +475,13 @@ def execute(changes: list[Change], adds: bool = True,
             out += [(c, None) for c in gone]
         except (OSError, ValueError) as e:
             out += [(c, str(e)) for c in gone]
+    titled = [c for c in changes if c.action == "rename" and c.entry is not None]
+    if titled:
+        try:
+            rename([(c.entry, c.name) for c in titled if c.entry is not None])
+            out += [(c, None) for c in titled]
+        except (OSError, ValueError) as e:
+            out += [(c, str(e)) for c in titled]
     for c in changes:
         if c.action == "add" and adds:
             try:

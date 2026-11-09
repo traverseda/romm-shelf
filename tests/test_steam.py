@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from romm_shelf import steam
+from romm_shelf.library import LocalRom
+from tests.conftest import rom
 
 
 def binary_vdf(shortcuts: dict[str, dict]) -> bytes:
@@ -255,8 +257,36 @@ def test_writing_the_file_back_keeps_every_byte_it_doesnt_change(steam_home):
     assert steam._dump(items) + tail == raw
 
 
+def test_a_title_names_the_emulator_and_host():
+    assert steam.display_name("Wizardry", "mesen", "deck") == "Wizardry - mesen - deck"
+
+
+def test_games_fills_in_the_emulator_and_this_host(monkeypatch):
+    monkeypatch.setattr(steam, "host_name", lambda: "deck")
+    found = steam.games([(LocalRom("nes", Path("Wizardry.zip")), rom(3, "nes", "Wizardry.zip"))],
+                        label=lambda local: "mesen")
+    assert [(g.rom_id, g.name) for g in found] == [(3, "Wizardry - mesen - deck")]
+
+
 def games(*items):
     return [steam.Game(rom, name, f"nes/{name}.nes", wanted) for rom, name, wanted in items]
+
+
+def test_the_plan_renames_a_title_that_is_only_the_game_name(steam_home):
+    shortcut_file(steam_home, {"0": game_entry(13, 3, "Kept")})
+    plan = steam.plan(games((3, "Kept - mesen - deck", True)))
+    assert [(c.action, c.entry.appid, c.name) for c in plan] == [("rename", 13, "Kept - mesen - deck")]
+
+
+def test_renaming_changes_only_the_title(steam_home):
+    path = shortcut_file(steam_home, {"0": UI, "1": game_entry(13, 3, "Kept")})
+    steam.execute(steam.plan(games((3, "Kept - mesen - deck", True))))
+    data = steam.read(path)["shortcuts"]
+    assert data["0"] == UI
+    assert data["1"]["AppName"] == "Kept - mesen - deck"
+    assert data["1"]["appid"] == 13
+    assert data["1"]["LaunchOptions"] == "play 3"
+    assert steam.plan(games((3, "Kept - mesen - deck", True))) == []
 
 
 def test_the_plan_removes_uninstalled_unwanted_and_duplicate_entries_and_adds_missing(steam_home):

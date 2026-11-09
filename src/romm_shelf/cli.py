@@ -354,16 +354,18 @@ def shortcut(
     _run_plan(settings, layout, local)  # refuse a game nothing here can run
     if rom is None:
         raise typer.BadParameter("RomM is unreachable: try adding the Steam shortcut once it's back")
-    _game_shortcut(rom, client, plan)
+    _game_shortcut(rom, client, plan, local)
 
 
-def _game_shortcut(rom, client, plan: bool) -> None:
+def _game_shortcut(rom, client, plan: bool, local: LocalRom) -> None:
     """The game's own Steam app, unless Steam already has it (a second one would split its profile)."""
-    name = rom.name or rom.fs_name_no_ext
+    name = steam.display_name(rom.name or rom.fs_name_no_ext, player.emulator_label(local))
     desktop = steam.desktop_file(rom.id)
     hit = steam.find(desktop, name)
     if hit:
         typer.echo(f"# Steam already has it as app {hit.appid}")
+        if hit.name != name:
+            typer.echo(f"# its title is {hit.name!r}; `romm-shelf steam sync` renames it to {name!r}")
         if not plan:
             steam.add_game(rom.id, name, lambda: media.cover(rom, client))  # adds a missing cover
         return
@@ -470,7 +472,8 @@ def play(
         # A game set to be in Steam only while playing had a temporary entry; take it out again.
         key = f"{local.system}/{local.name}"
         game = steam.Game(rom_id, name, key, steam.wanted(key))
-        for change, error in steam.execute(steam.plan([game], only={rom_id}), adds=False):
+        changes = [c for c in steam.plan([game], only={rom_id}) if c.action == "remove"]
+        for change, error in steam.execute(changes, adds=False):
             logger.info("{}{}", change.describe(), f" FAILED: {error}" if error else "")
         raise typer.Exit(code)
     except typer.Exit:
@@ -522,7 +525,7 @@ def get(
         typer.echo(step.describe())
     if in_steam:  # its own Steam app, so playing it is one step (design.md § Steam entries)
         try:
-            _game_shortcut(rom, client, plan=False)
+            _game_shortcut(rom, client, plan=False, local=LocalRom(rom.platform_fs_slug, target))
         except steam.SteamError as e:
             typer.echo(f"# not added to Steam: {e}. `romm-shelf shortcut {rom_id}` tries again.")
     typer.echo("# installed. Restart ES-DE to see it in the game list.")
@@ -623,12 +626,13 @@ def steam_sync(
     for change, error in results:
         if error:
             typer.echo(f"# {change.action} {change.name} failed: {error}")
-    removed = any(c.action == "remove" and not e for c, e in results)
-    if removed and steam.running():
+    changed = any(c.action in ("remove", "rename") and not e for c, e in results)
+    if changed and steam.running():
         if _restart_setting() if restart_steam is None else restart_steam:
-            typer.echo(f"# restarting Steam so they leave its library: {steam.restart_later()}")
+            typer.echo(f"# restarting Steam so the changes take effect: {steam.restart_later()}")
         else:
-            typer.echo("# Steam lists the removed entries until it restarts (`romm-shelf steam restart`)")
+            typer.echo("# Steam keeps the old entries and titles until it restarts "
+                       "(`romm-shelf steam restart`)")
     if any(e for _, e in results):
         raise typer.Exit(1)
 
@@ -639,16 +643,16 @@ def steam_restart(
     now: Annotated[bool, typer.Option("--now", hidden=True,
                                       help="Do it in this process (what the detached unit runs)")] = False,
 ):
-    """Restart Steam, taking out entries that should go while it's closed.
+    """Restart Steam, taking out entries and applying new titles while it's closed.
 
     Steam writes its own copy of its shortcuts over the file, so an entry only leaves its library
-    once it restarts. Runs outside Steam (a systemd user unit), so the UI and games closing with
-    Steam don't stop it."""
+    and a rename only appears once it restarts. Runs outside Steam (a systemd user unit), so the UI
+    and games closing with Steam don't stop it."""
     found, names, _, _ = _steam_games(None)  # RomM is asked before Steam closes; afterwards only files are read
-    gone = [c for c in steam.plan(found, names) if c.action == "remove"]
+    pending = lambda: [c for c in steam.plan(found, names) if c.action in ("remove", "rename")]
     if plan or not now:
         typer.echo("steam -shutdown, and wait for it to close")
-        for c in gone:
+        for c in pending():
             typer.echo(c.describe())
         typer.echo("start Steam again, unless the session already has")
         if not plan:
@@ -656,7 +660,7 @@ def steam_restart(
         return
 
     def while_closed():  # entries are read again: Steam rewrote the file as it closed
-        for change, error in steam.execute([c for c in steam.plan(found, names) if c.action == "remove"]):
+        for change, error in steam.execute(pending()):
             logger.info("{}{}", change.describe(), f" FAILED: {error}" if error else "")
     steam.restart(while_closed)
 

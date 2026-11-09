@@ -28,6 +28,25 @@ def test_a_packaged_game_launches_directly_not_through_steam(tmp_path):
     assert not player.launches_directly(LocalRom("nes", tmp_path / "game.nes"))
 
 
+def test_the_emulator_label_names_what_runs_the_game(tmp_path):
+    folder = tmp_path / "Folder Game"
+    folder.mkdir()
+    (folder / ".ludusavi.yaml").write_text("Folder Game: {}\n")
+    archive = tmp_path / "Game.squashfs"
+    archive.write_bytes(b"x")
+    assert player.emulator_label(LocalRom("linux", folder)) == "native"
+    assert player.emulator_label(LocalRom("linux", archive)) == "native"
+    assert player.emulator_label(LocalRom("win", archive)) == "proton"
+
+    class Mesen:
+        name, systems = "mesen", ("nes",)
+
+        def run_plan(self, rom, layout, bundle, runtime):
+            raise NotImplementedError
+
+    assert player.emulator_label(LocalRom("nes", tmp_path / "game.nes"), [Mesen()]) == "mesen"
+
+
 def test_the_plan_says_so_when_it_cannot_sync():
     run = RunPlan(Path("/emulator"), ("/rom.gba",), {}, Path("/roms/gba"), seed={})
     lines = player.plan_lines("Wizardry.zip", run, offline=True)

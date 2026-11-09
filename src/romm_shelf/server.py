@@ -233,7 +233,7 @@ class Shelf:
                       remote=list(self.library().roms.values()),
                       progress=lambda r, step, error: job["log"].append({"step": step.describe(), "error": error}))
             if steam.wanted(f"{rom.platform_fs_slug}/{target.name}"):
-                self.add_to_steam(rom, job)
+                self.add_to_steam(rom, job, LocalRom(rom.platform_fs_slug, target))
             self.end_job(job)
         except Exception as e:
             logger.exception("install of {} failed", rom_id)
@@ -241,15 +241,15 @@ class Shelf:
         finally:
             self.forget_sync_status()
 
-    def add_to_steam(self, rom: Rom, job: dict) -> None:
+    def add_to_steam(self, rom: Rom, job: dict, local: LocalRom) -> None:
         """The game's own Steam app, so Play only opens it. A failure is logged, not fatal: the game
         is installed, and Play adds the shortcut if it's still missing."""
         if not steam.available():
             return
         job["current"] = "adding it to Steam"
         try:
-            shortcut, added = steam.add_game(rom.id, rom.name or rom.fs_name_no_ext,
-                                             lambda: media.cover(rom, self.client))
+            name = steam.display_name(rom.name or rom.fs_name_no_ext, player.emulator_label(local))
+            shortcut, added = steam.add_game(rom.id, name, lambda: media.cover(rom, self.client))
             job["log"].append({"step": f"Steam app {shortcut.appid} ({'added' if added else 'already there'})",
                                "error": None})
         except steam.SteamError as e:
@@ -525,7 +525,8 @@ def create_app(settings: Settings | None = None, *, ui: bool = False, watch_slee
 
         def open_in_steam():
             try:
-                shortcut, added = steam.add_game(rom_id, name, lambda: media.cover(rom, shelf.client))
+                title = steam.display_name(name, player.emulator_label(local))
+                shortcut, added = steam.add_game(rom_id, title, lambda: media.cover(rom, shelf.client))
                 steam.launch(shortcut)
                 job["log"].append({"step": f"opened Steam app {shortcut.appid}"
                                            + (" (added it first)" if added else ""), "error": None})
