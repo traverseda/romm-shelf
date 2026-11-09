@@ -501,7 +501,8 @@ dispatch. `.github/workflows/release.yml` owns everything on a `v*` tag.
 
 1. `scripts/release.sh` (test, wheel/sdist, AppImage, packs, `SHA256SUMS`,
    `latest.json`)
-2. `scripts/publish-packs.sh` (GHCR, then verify each registry digest)
+2. `scripts/publish-packs.sh` (GHCR, then rewrite the pack digests in
+   `latest.json` to the registry's)
 3. `scripts/publish-docker.sh` (the streaming image, which pulls the same packs
    at runtime)
 4. create the GitHub Release with the AppImage, wheel, sdist, `SHA256SUMS` and

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build every release artifact, then write SHA256SUMS and latest.json
 # (notes-deployment.md § Release checklist). This does not publish anything:
-# scripts/publish-packs.sh pushes the packs, and the release workflow creates
-# the GitHub Release and uploads the assets.
+# scripts/publish-packs.sh pushes the packs and rewrites their digests in
+# latest.json to the registry's, and the release workflow creates the GitHub
+# Release and uploads the assets.
 #
 #   scripts/release.sh --plan   print the steps and outputs; change nothing
 #   scripts/release.sh          test, build, checksum, write dist/latest.json

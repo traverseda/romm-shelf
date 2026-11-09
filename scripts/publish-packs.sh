@@ -7,6 +7,11 @@
 # Run `skopeo login ghcr.io` first. The release workflow logs in with GITHUB_TOKEN
 # and the `packages: write` permission.
 #
+# The registry recomputes the image manifest when it accepts the docker archive, so
+# its digest is the one `latest.json` must pin. This script rewrites the `packs`
+# section of dist/latest.json with the registry digest (and layer size) after each
+# successful push.
+#
 # Environment:
 #   ROMM_SHELF_PACKS        space-separated pack names (default: every bundled emulator)
 #   ROMM_SHELF_PACK_OWNER   GHCR owner (default GITHUB_REPOSITORY_OWNER, else traverseda)
@@ -30,6 +35,7 @@ while (( $# )); do
 done
 
 require skopeo
+require jq
 
 if (( PLAN )); then
   cat <<EOF
@@ -42,6 +48,8 @@ Commands:
 EOF
 fi
 
+LATEST=$DIST_DIR/latest.json
+
 for name in $PACK_NAMES; do
   image=ghcr.io/$OWNER/romm-shelf-pack-$name
   tar=$DIST_DIR/romm-shelf-pack-$name.tar.gz
@@ -50,9 +58,14 @@ for name in $PACK_NAMES; do
   if (( PLAN )); then
     continue
   fi
-  local_digest=$(skopeo inspect --format '{{.Digest}}' "docker-archive:$tar")
   remote_digest=$(skopeo inspect --format '{{.Digest}}' "docker://$image:$VERSION")
-  [ "$local_digest" = "$remote_digest" ] || \
-    die "$name: GHCR digest $remote_digest is not the local $local_digest"
+  remote_size=$(skopeo inspect --raw "docker://$image:$VERSION" | jq '[.layers[].size] | add // 0')
   printf '%s %s\n' "$name" "$remote_digest"
+
+  if [ -f "$LATEST" ]; then
+    tmp=$LATEST.tmp
+    jq --arg name "$name" --arg digest "$remote_digest" --argjson size "$remote_size" \
+      '.packs[$name].digest = $digest | .packs[$name].size = $size' "$LATEST" > "$tmp" && \
+      mv "$tmp" "$LATEST"
+  fi
 done

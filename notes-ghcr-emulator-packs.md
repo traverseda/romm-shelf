@@ -448,10 +448,12 @@ update separately through the pack manager.
 `latest.json` lives in GitHub Releases. It carries the core AppImage and the
 pinned pack digests. `.github/workflows/release.yml` is the only tag publisher:
 on a `v*` tag it runs `scripts/release.sh` (tests, wheel, AppImage, packs,
-`SHA256SUMS`, `latest.json`), then `scripts/publish-packs.sh` pushes and verifies
-the GHCR digests, then `scripts/publish-docker.sh` publishes the streaming image,
-then it creates the GitHub Release and optionally publishes PyPI. `ci.yml` builds
-the core AppImage and streaming image on `main`/manual dispatch, and builds
+`SHA256SUMS`, `latest.json`), then `scripts/publish-packs.sh` pushes the packs
+and rewrites each digest in `latest.json` to the registry's (the registry
+recomputes the manifest, so the local docker-archive digest is not the one to
+pin), then `scripts/publish-docker.sh` publishes the streaming image, then it
+creates the GitHub Release and optionally publishes PyPI. `ci.yml` builds the
+core AppImage and streaming image on `main`/manual dispatch, and builds
 (cache-only) on other branches. The workflows only install tools and call
 scripts.
 
