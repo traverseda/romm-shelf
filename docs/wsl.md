@@ -46,11 +46,11 @@ the batch as your own user.
    `~/Applications/romm-shelf.AppImage` with a `~/.local/bin/romm-shelf` link;
 6. restarts WSL so systemd starts, enables lingering, and reports OpenGL/Vulkan.
 
-No release exists yet. To install a locally built AppImage:
+To install a locally built AppImage instead of the latest release:
 
 ```bat
 nix build .#appimage
-packaging\wsl\install-wsl.bat --appimage result\romm-shelf-0.1.0-x86_64.AppImage
+packaging\wsl\install-wsl.bat --appimage result\romm-shelf-<version>-x86_64.AppImage
 ```
 
 or inside WSL:

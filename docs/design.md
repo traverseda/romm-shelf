@@ -563,11 +563,12 @@ the Deck yet.*
   before the emulator starts: RetroArch ignores a `savestate_directory` that
   isn't there, falls back to its own, and writes that back on exit — which is
   how a patched path disappeared.
-- **Save state on exit** (`savestate_auto_save`) is a setting of the `retroarch`
-  patch, on by default: RetroArch writes the game's state when it closes, so the
-  state pushed on exit is the one just played. `savestate_auto_load` stays off; a
-  state is not resumed automatically. The option is in the patch's settings form
-  and `romm-shelf patches set retroarch save_state_on_exit=false`.
+- **Save state on exit, resume on open.** `savestate_auto_save` is a setting of
+  the `retroarch` patch, on by default: RetroArch writes the game's state when it
+  closes, so the state pushed on exit is the one just played. `savestate_auto_load`
+  is always on, so the next open resumes from that state. The exit option is in
+  the patch's settings form and `romm-shelf patches set retroarch
+  save_state_on_exit=false`.
 - **Layout without RetroDECK.** The same folder shape (`roms/`, `saves/`,
   `states/`, `bios/`, `mods/`) under one root. `ROMM_SHELF_ROOT` names it; without
   it, RetroDECK's `retrodeck.json` is still read, so a Deck's existing folders keep
@@ -841,17 +842,26 @@ tentative. Not run on the Deck yet.*
   overrides it per game (*Always* or *Only while playing*, or Inherit). An entry is
   romm-shelf's if it runs `romm-shelf play <rom>`; nothing else in Steam is touched,
   the UI's own entry included.
+- **Titles.** A game's entry is titled `<RomM name> - <emulator> - <hostname>`
+  (`steam.display_name`): the emulator that runs it (`mesen`, `dolphin`, the native
+  runner, or Proton), and the machine's kernel hostname. Steam never merges one
+  game's shortcut on two machines — a streamed tile keeps its host's appid, and a
+  shortcut that shares it is re-keyed — so the title is what tells a local tile from
+  the streamed one (tested 2026-11-09 on the Deck and azrael). Titles are re-derived
+  on every plan; `steam sync` rewrites `AppName` on an entry whose title differs.
 - **Stateless.** `romm-shelf steam sync [--game G] [--plan]` works the plan out every
   time from `shortcuts.vdf`, the installed games and the two settings files: add a
   wanted game without an entry, take out an entry whose game isn't installed or isn't
-  wanted, and take out a second entry for one game (the first, which Play opens,
-  stays). Nothing records which entries were added. Both patches run it: check mode
-  prints the plan, apply runs it.
+  wanted, take out a second entry for one game (the first, which Play opens, stays),
+  and retitle an entry whose emulator or host differs. Nothing records which entries
+  were added. Both patches run it: check mode prints the plan, apply runs it.
 - **Steam Input survives removal.** Steam keys a non-Steam game's controller profile
   by its lowercased name (`Steam Controller Configs/<id>/config/configset_controller_neptune.vdf`,
   checked on the Deck 2026-11-07), not by its appid. So a game set to *Only while
   playing* still has its own profile: Play adds the entry under the same name, and
-  `play` takes it out again when the game exits.
+  `play` takes it out again when the game exits. Retitling changes that key: a
+  renamed game starts from the default layout, and its old profile stays under the
+  old name.
 - **Removing.** There is no `steam://` URL that removes an entry, and the SteamClient
   JS API is off limits. romm-shelf rewrites `shortcuts.vdf` itself: every byte it
   doesn't remove is kept, the rest are renumbered 0..n-1, and the game's desktop
@@ -859,11 +869,12 @@ tentative. Not run on the Deck yet.*
   over it when it next saves its shortcuts, so the entry leaves the library when Steam
   restarts, and until then every sync takes it out of the file again.
 - **Restarting Steam.** `restart_steam` (on by default) makes applying the patch
-  restart Steam when it took an entry out: `romm-shelf steam restart` runs in its own
-  systemd user unit, since the UI and games close with Steam. It sends
-  `steam -shutdown`, takes entries out again once Steam has closed (it saves its
-  shortcuts on the way out), and starts Steam unless the session already has within
-  10 s. Uninstalling a game takes its entry out of the file but never restarts Steam.
+  restart Steam when it took an entry out or retitled one: `romm-shelf steam restart`
+  runs in its own systemd user unit, since the UI and games close with Steam. It sends
+  `steam -shutdown`, applies the removals and titles again once Steam has closed (it
+  saves its shortcuts on the way out), and starts Steam unless the session already has
+  within 10 s. Uninstalling a game takes its entry out of the file but never restarts
+  Steam.
 - **Installing** adds the entry only if it's wanted. Play adds a missing one either
   way, so every game still runs through Steam with Steam Input.
 - **Cover art.** Adding a game's shortcut gives it RomM's cover as its Steam library

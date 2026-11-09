@@ -41,3 +41,5 @@ Every change romm-shelf makes to the system is a **patch**: an ordinary Ansible 
 ```
 
 Patches from RomM run code on every paired device, so only put patches you trust on the server. For now that means your own and your agent's. Community patches may come later. See [docs/design.md § Patches](docs/design.md#patches) for the details.
+
+Patches are frankly a bit slow. This is largely a consequence of using ansible for patches, and every patch needing to check if it has been applied or not.
