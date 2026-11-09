@@ -391,19 +391,22 @@ def extract_layer(data: bytes, root: Path | str | None, digest: str) -> tuple[st
             for member in tar.getmembers():
                 _extract_one(member, tar, tmp)
         extracted = tmp / "nix/store"
-        if not extracted.is_dir():
-            return ()
-        target_root = root / "nix/store"
-        target_root.mkdir(parents=True, exist_ok=True)
-        # Record every store path the layer provides, even one already extracted by another pack.
-        # prune must see the shared path through this pack's index or it could remove it from under
-        # the other pack.
-        provided = tuple(f"nix/store/{path.name}" for path in sorted(extracted.iterdir()))
-        for path in sorted(extracted.iterdir()):
-            target = target_root / path.name
-            if target.exists() or target.is_symlink():
-                continue
-            os.replace(path, target)
+        provided: tuple[str, ...] = ()
+        if extracted.is_dir():
+            target_root = root / "nix/store"
+            target_root.mkdir(parents=True, exist_ok=True)
+            # Record every store path the layer provides, even one already extracted by another
+            # pack. prune must see the shared path through this pack's index or it could remove it
+            # from under the other pack.
+            provided = tuple(f"nix/store/{path.name}" for path in sorted(extracted.iterdir()))
+            for path in sorted(extracted.iterdir()):
+                target = target_root / path.name
+                if target.exists() or target.is_symlink():
+                    continue
+                os.replace(path, target)
+        # A layer can hold only the bundle tree at the image root (`./retroarch/...`) and no
+        # nix/store entries at all. It still gets an index: the pack's entry names the layer, and
+        # prune refuses to run while a referenced layer has none.
         layer_dir = root / "layers"
         layer_dir.mkdir(parents=True, exist_ok=True)
         _layer_path(root, digest).write_text(json.dumps({"digest": digest, "paths": provided}, indent=2) + "\n")

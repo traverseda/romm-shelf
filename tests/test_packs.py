@@ -136,6 +136,22 @@ def test_install_extracts_the_store_and_records_the_digest(tmp_path, fake):
     assert packs.layer_present(store, installed.layers[0])
 
 
+def test_a_layer_with_no_store_paths_is_still_recorded(tmp_path):
+    """The image's top layer is the bundle tree at the root, with no nix/store entries."""
+    layer = tar_bytes([
+        (".", None, "dir", None),
+        ("./retroarch", None, "dir", None),
+        ("./retroarch/bin/retroarch", None, "sym", f"/nix/store/{STORE}/retroarch/bin/retroarch"),
+    ])
+    digest_name = "sha256:" + hashlib.sha256(layer).hexdigest()
+    store = tmp_path / "packs"
+
+    assert packs.extract_layer(layer, store, digest_name) == ()
+    assert packs.layer_present(store, digest_name)
+    packs.save_index({"packs": {"retroarch": {"digest": "sha256:x", "layers": [digest_name]}}}, store)
+    assert packs.plan_prune(store).paths == ()
+
+
 def test_plan_install_downloads_no_layer(tmp_path, fake):
     plan = packs.plan_install(fake.ref, root=tmp_path / "packs", registry=fake.registry)
     assert plan.layers and plan.size
