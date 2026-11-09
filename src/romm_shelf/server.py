@@ -25,7 +25,8 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from romm_shelf import bios, emulators, media, mods, patches, player, sleep, steam
+from romm_shelf import bios, emulators, media, mods, packs, patches, player, sleep, steam
+from romm_shelf import update as updater
 from romm_shelf.adapters import DiscReader, load_adapters
 from romm_shelf.auth import Session, load_session
 from romm_shelf.config import Settings, host_env, play_log, program
@@ -646,6 +647,166 @@ def create_app(settings: Settings | None = None, *, ui: bool = False, watch_slee
         if not moved:
             raise HTTPException(404, "not on this device")
         return {"moved_to_backup": [str(dest) for _, dest in moved]}
+
+    # Updates (design.md § Distribution): the AppImage release (`romm-shelf update`) and the
+    # emulator packs (`romm-shelf packs`). Checking reads the release manifest; each action is an
+    # Activity job, so a controller can watch it and keep using the shelf.
+    @app.get("/api/updates")
+    def updates():
+        try:
+            core = updater.status()
+        except updater.UpdateError as e:
+            core = {"error": str(e)}
+        try:
+            here = packs.installed()
+            refs = packs.remote()
+        except packs.PackError as e:
+            pack_state = {"error": str(e), "installed": {}, "available": {}, "update": []}
+        else:
+            pack_state = {
+                "installed": {n: {"version": e.get("version") or "", "digest": e.get("digest") or "",
+                                  "image": e.get("image") or ""} for n, e in here.items()},
+                "available": {n: {"version": r.version, "digest": r.digest, "image": r.image,
+                                  "size": r.size} for n, r in refs.items()},
+                "update": packs.updatable(here, refs),
+            }
+        try:
+            plan = packs.plan_prune()
+            cleanup = {"paths": list(plan.paths), "indexes": [str(p) for p in plan.indexes], "error": None}
+        except packs.PackError as e:
+            cleanup = {"paths": [], "indexes": [], "error": str(e)}
+        return {"core": core, "packs": pack_state, "cleanup": cleanup}
+
+    def _pack_ref(name: str) -> packs.PackRef:
+        try:
+            refs = packs.remote()
+        except packs.PackError as e:
+            raise HTTPException(503, str(e))
+        ref = refs.get(name)
+        if ref is None:
+            raise HTTPException(404, f"no pack {name} in the release manifest")
+        return ref
+
+    @app.post("/api/update", status_code=202)
+    def update_appimage():
+        try:
+            dest = updater.installed_path()
+        except updater.UpdateError as e:
+            raise HTTPException(409, str(e))
+        if job := shelf.running("update", None):
+            return job
+        job = shelf.start_job("update", "romm-shelf AppImage", unit="bytes")
+
+        def work():
+            try:
+                release = updater.remote()
+                job["current"] = f"downloading {release.version}"
+                updater.download(release, dest,
+                                 progress=lambda done, total: job.update(done=done, total=total))
+                job["current"] = None
+                shelf.end_job(job)
+            except Exception as e:
+                logger.error("AppImage update: {}", e)
+                shelf.end_job(job, str(e) or type(e).__name__)
+
+        threading.Thread(target=work, daemon=True).start()
+        return job
+
+    @app.post("/api/update/rollback")
+    def rollback_appimage():
+        try:
+            dest = updater.installed_path()
+            updater.rollback(dest)
+        except updater.UpdateError as e:
+            raise HTTPException(409, str(e))
+        return {"rolled_back": str(dest)}
+
+    @app.post("/api/packs/{name}/install", status_code=202)
+    def pack_install(name: str):
+        ref = _pack_ref(name)
+        if name in packs.installed():
+            raise HTTPException(409, f"{name} is already installed")
+        job = shelf.start_job("pack", f"install pack {name}", unit="steps", total=1)
+
+        def work():
+            try:
+                job["current"] = f"fetching {ref.version or ref.digest}"
+                installed = packs.install(ref)
+                job["log"].append({"step": f"{installed.name} {installed.version}", "error": None})
+                job["done"] = 1
+                shelf.end_job(job)
+            except Exception as e:
+                logger.error("install pack {}: {}", name, e)
+                shelf.end_job(job, str(e) or type(e).__name__)
+
+        threading.Thread(target=work, daemon=True).start()
+        return job
+
+    @app.post("/api/packs/update", status_code=202)
+    def pack_update(name: str | None = None):
+        try:
+            here = packs.installed()
+            refs = packs.remote()
+        except packs.PackError as e:
+            raise HTTPException(503, str(e))
+        if name is not None:
+            if name not in refs:
+                raise HTTPException(404, f"no pack {name} in the release manifest")
+            if name not in here:
+                raise HTTPException(409, f"{name} is not installed")
+            names = [name] if name in packs.updatable(here, refs) else []
+        else:
+            names = packs.updatable(here, refs)
+        job = shelf.start_job("pack", "update emulator packs", unit="steps", total=len(names))
+
+        def work():
+            try:
+                if not names:
+                    job["log"].append({"step": "every pack is up to date", "error": None})
+                    shelf.end_job(job)
+                    return
+                for n in names:
+                    job["current"] = f"updating {n} to {refs[n].version or refs[n].digest}"
+                    installed = packs.install(refs[n])
+                    job["log"].append({"step": f"{installed.name} {installed.version}", "error": None})
+                    job["done"] += 1
+                job["current"] = "cleaning up old files"
+                cleaned = packs.prune()
+                job["log"].append({"step": f"removed {len(cleaned.paths)} old store path(s)", "error": None})
+                shelf.end_job(job)
+            except Exception as e:
+                logger.error("update packs: {}", e)
+                shelf.end_job(job, str(e) or type(e).__name__)
+
+        threading.Thread(target=work, daemon=True).start()
+        return job
+
+    @app.post("/api/packs/{name}/remove")
+    def pack_remove(name: str):
+        if packs.remove(name) is None:
+            raise HTTPException(404, f"{name} is not installed")
+        return {"removed": name}
+
+    @app.post("/api/packs/prune", status_code=202)
+    def pack_prune():
+        try:
+            plan = packs.plan_prune()
+        except packs.PackError as e:
+            raise HTTPException(409, str(e))
+        job = shelf.start_job("prune", "clean up old emulator files", unit="paths", total=len(plan.paths))
+
+        def work():
+            try:
+                cleaned = packs.prune()
+                job["done"] = len(cleaned.paths)
+                job["log"].append({"step": f"removed {len(cleaned.paths)} store path(s)", "error": None})
+                shelf.end_job(job)
+            except Exception as e:
+                logger.error("prune packs: {}", e)
+                shelf.end_job(job, str(e) or type(e).__name__)
+
+        threading.Thread(target=work, daemon=True).start()
+        return job
 
     # Patches (design.md § Patches): the same list and plans as `romm-shelf patches`.
     # RomM is a layer of patches (design.md § Patches, From RomM): its copies are refreshed when the

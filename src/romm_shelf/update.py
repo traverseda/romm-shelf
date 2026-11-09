@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -71,8 +72,37 @@ def is_current(release: Release) -> bool:
     return packs.version_tuple(__version__) >= packs.version_tuple(release.version)
 
 
+def status(http: httpx.Client | None = None) -> dict:
+    """What a front end shows: the installed version, the release it can move to, and whether
+    this installation can replace itself.
+
+    From a checkout, Nix or PyPI install the release is still reported so the UI can say an
+    update exists; `can_update` is false and `note` gives the command that updates it instead.
+    """
+    release = remote(http=http)
+    out = {
+        "installed": __version__,
+        "available": release.version,
+        "current": is_current(release),
+        "url": release.url,
+        "sha256": release.sha256,
+        "size": release.size,
+        "released_at": release.released_at,
+        "destination": None,
+        "can_update": False,
+        "note": None,
+    }
+    try:
+        out["destination"] = str(installed_path())
+        out["can_update"] = True
+    except UpdateError as e:
+        out["note"] = str(e)
+    return out
+
+
 def download(release: Release, dest: Path | str, *,
-             http: httpx.Client | None = None) -> Path:
+             http: httpx.Client | None = None,
+             progress: Callable[[int, int], None] | None = None) -> Path:
     """Fetch, verify and atomically replace `dest`, keeping the old file once as `.previous`."""
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -82,9 +112,9 @@ def download(release: Release, dest: Path | str, *,
         if http is None:
             with httpx.Client(follow_redirects=True,
                               timeout=httpx.Timeout(60, read=300)) as client:
-                _fetch(client, release, tmp)
+                _fetch(client, release, tmp, progress)
         else:
-            _fetch(http, release, tmp)
+            _fetch(http, release, tmp, progress)
         tmp.chmod(0o755)
         if dest.is_file():
             shutil.copy2(dest, previous)
@@ -95,7 +125,8 @@ def download(release: Release, dest: Path | str, *,
     return dest
 
 
-def _fetch(http: httpx.Client, release: Release, tmp: Path) -> None:
+def _fetch(http: httpx.Client, release: Release, tmp: Path,
+           progress: Callable[[int, int], None] | None = None) -> None:
     digest = hashlib.sha256()
     total = 0
     try:
@@ -106,6 +137,8 @@ def _fetch(http: httpx.Client, release: Release, tmp: Path) -> None:
                     fh.write(chunk)
                     digest.update(chunk)
                     total += len(chunk)
+                    if progress is not None:
+                        progress(total, release.size or 0)
     except httpx.HTTPError as e:
         raise UpdateError(f"{release.url}: {e}") from e
     actual = digest.hexdigest()

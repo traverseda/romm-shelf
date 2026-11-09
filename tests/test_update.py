@@ -48,9 +48,9 @@ def test_parse_release_needs_an_appimage():
 
 
 def test_current_when_installed_is_not_older():
-    assert update.is_current(update.Release("0.1.0", "u", "s"))
-    assert update.is_current(update.Release("0.1.0-rc1", "u", "s"))
-    assert not update.is_current(update.Release("0.2.0", "u", "s"))
+    assert update.is_current(update.Release(update.__version__, "u", "s"))
+    assert update.is_current(update.Release("0.0.1", "u", "s"))
+    assert not update.is_current(update.Release("99.0.0", "u", "s"))
 
 
 def test_download_replaces_the_file_and_keeps_one_previous(tmp_path):
@@ -125,3 +125,44 @@ def test_installed_path_refuses_a_checkout(monkeypatch):
 
     with pytest.raises(update.UpdateError, match="not running from an AppImage"):
         update.installed_path()
+
+
+def manifest_client(version: str = "0.2.0") -> httpx.Client:
+    data = {"version": version, "appimage": {
+        "url": "https://example.test/romm-shelf-0.2.0-x86_64.AppImage",
+        "sha256": "ab" * 32, "size": 123}}
+    return httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=data)))
+
+
+def test_status_reports_the_release_and_that_an_appimage_can_update(tmp_path, monkeypatch):
+    dest = tmp_path / "romm-shelf.AppImage"
+    dest.write_bytes(b"x")
+    monkeypatch.setattr(update, "installed_path", lambda: dest)
+
+    state = update.status(http=manifest_client())
+
+    assert state["installed"] == update.__version__
+    assert state["available"] == "0.2.0"
+    assert state["can_update"] is True
+    assert state["destination"] == str(dest)
+    assert state["note"] is None
+
+
+def test_status_from_a_checkout_says_how_to_update(monkeypatch):
+    def not_an_appimage():
+        raise update.UpdateError("not running from an AppImage; use nix profile upgrade")
+
+    monkeypatch.setattr(update, "installed_path", not_an_appimage)
+
+    state = update.status(http=manifest_client())
+
+    assert state["can_update"] is False
+    assert state["destination"] is None
+    assert "nix profile upgrade" in state["note"]
+
+
+def test_download_reports_progress(tmp_path):
+    seen: list[tuple[int, int]] = []
+    update.download(make_release(), tmp_path / "romm-shelf.AppImage", http=client(BODY),
+                    progress=lambda done, total: seen.append((done, total)))
+    assert seen[-1] == (len(BODY), len(BODY))

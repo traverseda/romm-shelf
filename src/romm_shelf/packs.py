@@ -18,6 +18,7 @@ import os
 import shutil
 import tarfile
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
@@ -424,6 +425,12 @@ def version_tuple(value: str) -> tuple[int, ...]:
     return tuple(bits)
 
 
+def updatable(here: dict[str, dict], refs: dict[str, PackRef]) -> list[str]:
+    """Installed packs whose digest differs from the one `latest.json` names."""
+    return sorted(name for name in here
+                  if name in refs and here[name].get("digest") != refs[name].digest)
+
+
 def _labels(config: dict) -> dict[str, str]:
     labels = (config.get("config") or {}).get("Labels") or {}
     return {str(k): str(v) for k, v in labels.items()}
@@ -502,6 +509,26 @@ def install(ref: PackRef, root: Path | str | None = None, registry: Registry | N
     index["packs"][ref.name] = entry
     save_index(index, root)
     return Installed(ref.name, ref.image, ref.digest, entry["version"], emulators, tuple(layers))
+
+
+def update_installed(names: list[str] | tuple[str, ...], refs: dict[str, PackRef],
+                     root: Path | str | None = None,
+                     registry_for: Callable[[PackRef], Registry] | None = None,
+                     on_pack: Callable[[Installed], None] | None = None,
+                     ) -> tuple[list[Installed], PrunePlan]:
+    """Install each named ref, then remove store paths no installed pack still references.
+
+    A failed install raises before cleanup runs, so a half-finished update never deletes the
+    files its current pack needs. `registry_for` lets a test answer with a fake registry.
+    """
+    registry_for = registry_for or (lambda ref: Registry.from_image(ref.image))
+    done = []
+    for name in names:
+        installed = install(refs[name], root=root, registry=registry_for(refs[name]))
+        done.append(installed)
+        if on_pack is not None:
+            on_pack(installed)
+    return done, prune(root)
 
 
 def remove(name: str, root: Path | str | None = None) -> dict | None:

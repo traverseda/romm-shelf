@@ -52,8 +52,8 @@ def tar_bytes(entries: list[tuple[str, bytes | None, str, str | None]]) -> bytes
     return buffer.getvalue()
 
 
-def default_layer() -> bytes:
-    root = f"nix/store/{STORE}"
+def default_layer(store: str = STORE) -> bytes:
+    root = f"nix/store/{store}"
     return tar_bytes([
         (f"{root}", None, "dir", None),
         (f"{root}/retroarch", None, "dir", None),
@@ -71,14 +71,14 @@ class Fake:
     layer: bytes
 
 
-def fake_image(root: Path, layer: bytes | None = None) -> Fake:
-    layer = layer if layer is not None else default_layer()
+def fake_image(root: Path, layer: bytes | None = None, store: str = STORE) -> Fake:
+    layer = layer if layer is not None else default_layer(store)
     layer_digest = "sha256:" + hashlib.sha256(layer).hexdigest()
     config = json.dumps({
         "config": {
             "Labels": {
                 packs.PACK_LABEL: "retroarch",
-                packs.EMULATORS_LABEL: f"/nix/store/{STORE}",
+                packs.EMULATORS_LABEL: f"/nix/store/{store}",
                 packs.VERSION_LABEL: "1.22.2",
             }
         }
@@ -377,3 +377,48 @@ def test_cli_install_plan_changes_nothing(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert "download 1 layer" in result.output
     assert called == []
+
+
+def test_updatable_names_only_installed_packs_whose_digest_moved():
+    refs = {"retroarch": packs.PackRef("retroarch", IMAGE, "sha256:new"),
+            "dolphin": packs.PackRef("dolphin", "ghcr.io/example/dolphin", "sha256:d"),
+            "pcsx2": packs.PackRef("pcsx2", "ghcr.io/example/pcsx2", "sha256:p")}
+    here = {"retroarch": {"digest": "sha256:old"}, "dolphin": {"digest": "sha256:d"}}
+    assert packs.updatable(here, refs) == ["retroarch"]
+
+
+def test_update_installed_moves_the_pack_and_prunes_the_old_store(tmp_path):
+    store = tmp_path / "packs"
+    first = fake_image(tmp_path)
+    packs.install(first.ref, root=store, registry=first.registry)
+    assert (store / "nix/store" / STORE).is_dir()
+
+    new_store = "dddddddddddddddddddddddddddddddd-romm-shelf-emulators-retroarch"
+    second = fake_image(tmp_path, store=new_store)
+    updated, cleaned = packs.update_installed(
+        ["retroarch"], {"retroarch": second.ref}, root=store,
+        registry_for=lambda ref: second.registry)
+
+    assert [i.digest for i in updated] == [second.ref.digest]
+    assert f"nix/store/{STORE}" in cleaned.paths
+    assert not (store / "nix/store" / STORE).exists()
+    assert (store / "nix/store" / new_store).is_dir()
+    assert packs.installed(store)["retroarch"]["digest"] == second.ref.digest
+
+
+def test_a_failed_update_does_not_prune_the_current_pack(tmp_path):
+    store = tmp_path / "packs"
+    first = fake_image(tmp_path)
+    packs.install(first.ref, root=store, registry=first.registry)
+
+    def failed(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    broken = packs.Registry(IMAGE, http=httpx.Client(transport=httpx.MockTransport(failed)))
+    with pytest.raises(packs.PackError):
+        packs.update_installed(
+            ["retroarch"], {"retroarch": packs.PackRef("retroarch", IMAGE, "sha256:x")},
+            root=store, registry_for=lambda ref: broken)
+
+    assert (store / "nix/store" / STORE).is_dir()
+    assert packs.installed(store)["retroarch"]["digest"] == first.ref.digest

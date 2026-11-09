@@ -1371,15 +1371,26 @@ shortcut. Screens:
     CLI equivalent is `play --plan` / `play`. `ROMM_SHELF_LAUNCH=direct` starts
     `romm-shelf play` from the UI's server instead, for a machine without Steam;
     that path has no Steam Input. The default is `steam`.
-- **BIOS:** the last tab. For each system with games on RomM it lists the files
+- **BIOS:** after Patches. For each system with games on RomM it lists the files
   RetroDECK expects, each with a status: verified, present (no checksum to
   check), found under another name, wrong checksum, on RomM, or missing. A gets
   a file from RomM, or removes it (press twice; it goes to the backup folder).
   Files that are missing both here and on RomM are folded into one row per
   system. A wrong-checksum file is never removable from the UI, because it is
   often another BIOS under that name that an emulator is using.
+- **Updates:** after BIOS. The AppImage row is `romm-shelf update --check`: installed
+  and available versions, and A (press twice) downloads, verifies and replaces
+  the AppImage, which takes effect when romm-shelf restarts. Below it, one row
+  per emulator pack from `latest.json`: A installs a missing pack, updates an
+  installed one whose digest moved (press twice), or removes it (press twice;
+  its files stay until cleanup). Update N applies every newer digest, then
+  prunes store paths no installed pack uses. A successful CLI `packs update`
+  prunes the same way. The cleanup row removes what a removed pack left behind.
+  Every action is an Activity job, so the download can be watched. See
+  [Distribution](#distribution).
 - **Activity:** the last 50 jobs the UI's server and the background service ran: installs
-  (bytes), syncs from hooks, sleep or uninstall (files), and BIOS downloads. A
+  (bytes), syncs from hooks, sleep or uninstall (files), BIOS downloads, and
+  AppImage/emulator updates. A
   row expands to its per-file log. While anything runs, a strip above the hint
   bar shows it on every screen. Kept in memory only. Syncs run from the CLI are
   a separate process and don't appear.

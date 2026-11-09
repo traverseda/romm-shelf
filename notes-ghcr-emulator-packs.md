@@ -374,7 +374,11 @@ romm-shelf packs prune [--plan]
 - `prune` removes store paths not referenced by any installed pack's layer
   indexes.
 - Every command supports `--plan` and changes nothing.
-- The UI gets the same actions from the same core functions (CLI/UI parity).
+- A successful `update` prunes unreferenced store paths automatically; `remove`
+  leaves them for the separate `prune`.
+- The UI gets the same actions from the same core functions (CLI/UI parity): the
+  Updates tab reads `GET /api/updates` and posts to `/api/update`,
+  `/api/packs/…` and `/api/packs/prune`, all as Activity jobs.
 - Offline installs fail cleanly; installed packs keep working offline.
 - Handle GHCR rate limits with backoff and a clear message.
 
@@ -527,7 +531,8 @@ path that bwrap hides.
 - Fallback for systems without user namespaces: external emulators, `proot`, or a
   fat AppImage.
 - `maxLayers` and grouping; whether `nix2container` replaces `buildLayeredImage`.
-- Prune policy: manual only, or automatic after updates.
+- ~~Prune policy: manual only, or automatic after updates.~~ Decided 2026-11-08:
+  automatic after a successful update, and a manual cleanup action in the UI too.
 - Whether a fat AppImage remains as an offline/air-gapped option.
 - GHCR package visibility automation after the first publish.
 

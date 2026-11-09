@@ -877,13 +877,15 @@ def packs_update(
     name: Annotated[str | None, typer.Argument(help="Only this pack; without one, every installed pack")] = None,
     plan: Annotated[bool, typer.Option("--plan", help="Print what would be downloaded; download nothing")] = False,
 ):
-    """Update installed packs to the digests the release manifest names."""
+    """Update installed packs to the digests the release manifest names, then clean up old files."""
     refs = _pack_refs()
     here = _installed_packs()
     if name is not None and name not in refs:
         raise typer.BadParameter(f"no pack {name} in the release manifest")
-    names = [name] if name is not None else sorted(here)
-    todo = [n for n in names if n in refs and here.get(n, {}).get("digest") != refs[n].digest]
+    if name is not None and name not in here:
+        typer.echo(f"# {name} is not installed; use `romm-shelf packs install {name}`")
+        return
+    todo = [name] if name is not None else packs.updatable(here, refs)
     if not todo:
         typer.echo("# every pack is up to date")
         return
@@ -894,14 +896,16 @@ def packs_update(
             raise typer.BadParameter(str(e))
         for line in p.describe():
             typer.echo(line)
+    typer.echo("# then remove store paths no installed pack references")
     if plan:
         return
-    for n in todo:
-        try:
-            installed = packs.install(refs[n])
-        except packs.PackError as e:
-            raise typer.BadParameter(str(e))
+    try:
+        updated, cleaned = packs.update_installed(todo, refs)
+    except packs.PackError as e:
+        raise typer.BadParameter(str(e))
+    for installed in updated:
         typer.echo(f"# updated {installed.name} {installed.version} ({installed.digest})")
+    typer.echo(f"# cleaned up {len(cleaned.paths)} old store path(s)")
 
 
 @packs_app.command("remove")

@@ -115,6 +115,7 @@
         Activity <q-spinner v-if="runningJobs.length" size="14px"></q-spinner></div>
       <div class="tab" :class="{active: platform === PATCHES}" tabindex="0" data-nav @click="platform = PATCHES">Patches</div>
       <div class="tab" :class="{active: platform === BIOS}" tabindex="0" data-nav @click="platform = BIOS">BIOS</div>
+      <div class="tab" :class="{active: platform === UPDATES}" tabindex="0" data-nav @click="platform = UPDATES">Updates</div>
     </div>
 
     <template v-if="isLibrary">
@@ -280,6 +281,77 @@
         <div>A: show</div>
       </div>
     </div>
+  </div>
+  <div v-else-if="platform === UPDATES" class="bios" data-nav-group="grid" data-nav-up="tabs">
+    <div v-if="updatesLoading && !updates" class="q-pa-xl text-center"><q-spinner size="48px"></q-spinner><div>Checking for updates…</div></div>
+    <div v-if="updatesMessage" class="q-pa-sm text-grey-4">{{ updatesMessage }}</div>
+    <template v-if="updates">
+      <div class="q-mb-lg">
+        <div class="text-h6 q-mb-xs">romm-shelf</div>
+        <div v-if="updates.core.error" class="bios-row text-negative">
+          <q-badge color="grey-8" class="bios-badge">unknown</q-badge>
+          <div class="col">{{ updates.core.error }}</div>
+        </div>
+        <div v-else class="bios-row" tabindex="0" data-nav @click="coreAct()">
+          <q-badge :color="updates.core.current ? 'positive' : 'warning'" class="bios-badge">
+            {{ updates.core.current ? "up to date" : "update available" }}</q-badge>
+          <div class="col">
+            <div>Installed {{ updates.core.installed }} · available {{ updates.core.available }}</div>
+            <div class="text-grey-6" style="font-size:12px">
+              {{ updates.core.note || (updates.core.current ? "Nothing to install."
+                  : `Download ${size(updates.core.size)} from GitHub Releases.`) }}</div>
+          </div>
+          <div class="text-grey-5" style="white-space:nowrap">
+            <q-spinner v-if="updatesBusy === '__core'"></q-spinner>
+            <span v-else-if="!updates.core.current && updates.core.can_update"
+                  :class="{ 'text-negative': confirmUpdate }">{{ confirmUpdate ? "A again: update" : "A: update" }}</span>
+            <span v-else-if="!updates.core.current">not updatable here</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="q-mb-lg">
+        <div class="row items-center q-gutter-sm q-mb-xs">
+          <div class="text-h6">Emulators</div>
+          <div class="text-grey-5">{{ packSummary }}</div>
+          <q-space></q-space>
+          <q-btn v-if="updates.packs.update.length" color="primary" unelevated dense class="q-px-md" data-nav
+                 :loading="updatesBusy === '__packs'" :label="`Update ${updates.packs.update.length}`"
+                 @click="updatePacks()"></q-btn>
+        </div>
+        <div v-if="updates.packs.error" class="bios-row text-negative">
+          <q-badge color="grey-8" class="bios-badge">unknown</q-badge>
+          <div class="col">{{ updates.packs.error }}</div>
+        </div>
+        <div v-else-if="!packRows.length" class="q-pa-md text-grey-5">The release publishes no emulator packs.</div>
+        <div v-for="p in packRows" :key="p.name" class="bios-row" tabindex="0" data-nav @click="packAct(p)">
+          <q-badge :color="packBadge(p).color" class="bios-badge">{{ packBadge(p).label }}</q-badge>
+          <div class="col">
+            <div>{{ p.name }}
+              <span v-if="p.installed" class="text-grey-5">· installed {{ p.installed.version || p.installed.digest }}</span>
+              <span v-if="p.available" class="text-grey-5"> · release {{ p.available.version || p.available.digest }}</span></div>
+            <div class="text-grey-6" style="font-size:12px">{{ packNote(p) }}</div>
+          </div>
+          <div class="text-grey-5" style="white-space:nowrap">
+            <q-spinner v-if="updatesBusy === p.name"></q-spinner>
+            <span v-else :class="{ 'text-negative': confirmPack === p.name }">{{ packAction(p) }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="updates.cleanup.error" class="q-mb-lg text-warning">{{ updates.cleanup.error }}</div>
+      <div v-else-if="updates.cleanup.paths.length" class="q-mb-lg">
+        <div class="text-h6 q-mb-xs">Old emulator files</div>
+        <div class="bios-row" tabindex="0" data-nav @click="cleanUp()">
+          <q-badge color="grey-8" class="bios-badge">{{ updates.cleanup.paths.length }} files</q-badge>
+          <div class="col">Store paths no installed emulator pack uses; they can be downloaded again.</div>
+          <div class="text-grey-5" style="white-space:nowrap">
+            <q-spinner v-if="updatesBusy === '__cleanup'"></q-spinner>
+            <span v-else :class="{ 'text-negative': confirmCleanup }">{{ confirmCleanup ? "A again: clean up" : "A: clean up" }}</span>
+          </div>
+        </div>
+      </div>
+    </template>
   </div>
   <div v-else-if="!shown.length" class="empty-state" data-nav-group="grid" data-nav-up="toolbar,tabs">
     <template v-if="filter === 'sync' && syncLoading">
@@ -547,7 +619,7 @@ const app = createApp({
       { key: "all", label: "All" }, { key: "device", label: "On device" },
       { key: "remote", label: "Not installed" }, { key: "sync", label: "Out of sync" },
     ];
-    const isLibrary = computed(() => ![ACTIVITY, PATCHES, BIOS].includes(platform.value));
+    const isLibrary = computed(() => ![ACTIVITY, PATCHES, BIOS, UPDATES].includes(platform.value));
     const roms = computed(() => lib.value.roms.map((r) => ({ ...r, key: norm(r.name) })));
     const byName = computed(() => [...roms.value].sort((a, b) => a.key.localeCompare(b.key)));
     const searched = computed(() => {
@@ -659,7 +731,25 @@ const app = createApp({
           if (played.status === "failed") message.value = `Not started: ${played.error}`;
           else { message.value = null; detailOpen.value = false; }
         }
-        if (finished.some((j) => j.kind !== "play")) await reload();
+        // An update or pack job changes the Updates screen, not the library. Check the job we
+        // started by id too: a fast prune can finish before a poll ever sees it running.
+        const managed = finished.filter((j) => ["update", "pack", "prune"].includes(j.kind));
+        const ours = updateJob.value != null ? activity.value.find((j) => j.id === updateJob.value) : null;
+        if (ours && ours.status !== "running") {
+          if (!managed.some((j) => j.id === ours.id)) managed.push(ours);
+          updateJob.value = null;
+        }
+        if (managed.length) {
+          updatesBusy.value = null;
+          for (const j of managed) {
+            updatesMessage.value = j.status === "done"
+              ? (j.kind === "update" ? "Updated. Restart romm-shelf to use it."
+                 : j.kind === "prune" ? "Old emulator files removed." : "Emulator packs updated.")
+              : `${j.kind === "update" ? "AppImage update" : j.kind === "prune" ? "Clean up" : "Emulator pack"} failed: ${j.error || "see Activity"}`;
+          }
+          await loadUpdates();
+        }
+        if (finished.some((j) => !["play", "update", "pack", "prune"].includes(j.kind))) await reload();
         // The background service's syncs are another process: its plan cache isn't ours to drop.
         if (finished.some((j) => j.kind === "sync" || j.kind === "install")) loadSyncStatus(true);
         if (syncBusy.value && !activity.value.some((j) => j.id === syncBusy.value && j.status === "running")) syncBusy.value = false;
@@ -789,6 +879,102 @@ const app = createApp({
       elsewhere: { color: "positive", label: "found" },
       mismatch: { color: "warning", label: "wrong checksum" },
     })[f.local] || (f.on_romm ? { color: "primary", label: "on RomM" } : { color: "grey-8", label: "missing" });
+
+    // Updates tab (design.md § Distribution): the AppImage release and the GHCR emulator packs,
+    // the same checks and actions as `romm-shelf update` and `romm-shelf packs`. Actions run as
+    // Activity jobs; the screen refreshes when one ends (pollActivity below).
+    const UPDATES = "__updates";
+    const updates = ref(null), updatesLoading = ref(false), updatesBusy = ref(null), updatesMessage = ref(null);
+    const updateJob = ref(null), confirmUpdate = ref(false), confirmPack = ref(null), confirmCleanup = ref(false);
+    async function loadUpdates() {
+      updatesLoading.value = true;
+      try {
+        const res = await fetch("/api/updates");
+        if (!res.ok) throw new Error(`updates: HTTP ${res.status}`);
+        updates.value = await res.json();
+      } catch (e) { updatesMessage.value = String(e); }
+      updatesLoading.value = false;
+      confirmUpdate.value = false; confirmPack.value = null; confirmCleanup.value = false;
+      await nextTick();
+      if (!document.activeElement?.closest('[data-nav-group="grid"]'))
+        document.querySelector('[data-nav-group="grid"] [data-nav]')?.focus();
+    }
+    const packRows = computed(() => {
+      const p = updates.value?.packs;
+      if (!p || p.error) return [];
+      const names = [...new Set([...Object.keys(p.installed || {}), ...Object.keys(p.available || {})])].sort();
+      return names.map((name) => {
+        const installed = p.installed?.[name], available = p.available?.[name];
+        return { name, installed, available,
+                 update: !!(installed && available && installed.digest !== available.digest) };
+      });
+    });
+    const packSummary = computed(() => {
+      const p = updates.value?.packs;
+      if (!p || p.error) return "";
+      const installed = Object.keys(p.installed || {}).length;
+      const behind = p.update?.length || 0;
+      return `${installed} installed · ${behind ? `${behind} to update` : "all up to date"}`;
+    });
+    const packBadge = (p) => p.update ? { color: "warning", label: "update available" }
+      : p.installed ? { color: "positive", label: "installed" } : { color: "grey-8", label: "not installed" };
+    const packNote = (p) => p.update ? `Update available: ${p.available?.version || p.available?.digest}.`
+      : !p.installed ? (p.available ? `Not installed; the release has ${p.available.version || p.available.digest}.` : "Not installed.")
+      : "Installed and up to date.";
+    const packAction = (p) => p.update ? (confirmPack.value === p.name ? "A again: update" : "A: update")
+      : !p.installed ? "A: install"
+      : (confirmPack.value === p.name ? "A again: remove" : "A: remove");
+    async function postUpdateAction(url, label) {
+      updatesMessage.value = null;
+      const res = await fetch(url, { method: "POST" });
+      const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+      if (!res.ok) { updatesMessage.value = `${label}: ${apiError(body, res)}`; return null; }
+      if (body?.id != null && body.status === "running") updateJob.value = body.id;
+      watchJobs();
+      return body;
+    }
+    async function coreAct() {
+      const core = updates.value?.core;
+      if (!core || core.error || core.current || !core.can_update || updatesBusy.value) return;
+      if (!confirmUpdate.value) { confirmUpdate.value = true; return; }
+      confirmUpdate.value = false; updatesBusy.value = "__core";
+      if (await postUpdateAction("/api/update", "Update"))
+        updatesMessage.value = "Downloading the new AppImage… it takes effect when romm-shelf restarts.";
+      else updatesBusy.value = null;
+    }
+    async function packAct(p) {
+      if (updatesBusy.value) return;
+      if (p.update || !p.installed) {
+        if (p.update && confirmPack.value !== p.name) { confirmPack.value = p.name; return; }
+        confirmPack.value = null; updatesBusy.value = p.name;
+        const url = p.update ? `/api/packs/update?name=${encodeURIComponent(p.name)}`
+                             : `/api/packs/${encodeURIComponent(p.name)}/install`;
+        if (!await postUpdateAction(url, `${p.update ? "update" : "install"} ${p.name}`))
+          updatesBusy.value = null;
+        return;
+      }
+      if (confirmPack.value !== p.name) { confirmPack.value = p.name; return; }
+      confirmPack.value = null; updatesBusy.value = p.name;
+      const job = await postUpdateAction(`/api/packs/${encodeURIComponent(p.name)}/remove`, `remove ${p.name}`);
+      updatesBusy.value = null;
+      if (job) { updatesMessage.value = `Removed ${p.name}. Its files stay until you clean up.`; await loadUpdates(); }
+    }
+    async function updatePacks() {
+      if (updatesBusy.value) return;
+      updatesBusy.value = "__packs";
+      if (await postUpdateAction("/api/packs/update", "Update packs"))
+        updatesMessage.value = "Updating emulator packs…";
+      else updatesBusy.value = null;
+    }
+    async function cleanUp() {
+      if (updatesBusy.value) return;
+      if (!confirmCleanup.value) { confirmCleanup.value = true; return; }
+      confirmCleanup.value = false; updatesBusy.value = "__cleanup";
+      if (await postUpdateAction("/api/packs/prune", "Clean up"))
+        updatesMessage.value = "Cleaning up old emulator files…";
+      else updatesBusy.value = null;
+    }
+
     // Patches tab (design.md § Patches): each Ansible playbook, with what applying it would
     // change now (check mode). Patches only converge: there is no remove.
     const PATCHES = "__patches";
@@ -970,15 +1156,16 @@ const app = createApp({
       confirmBios.value = null;
       if (p === BIOS && !bios.value.length) loadBios();
       if (p === PATCHES && !patchList.value.length) loadPatches();
+      if (p === UPDATES) loadUpdates();
     }, { immediate: true });  // the remembered tab may be one of these
 
     const platforms = computed(() => lib.value.platforms);
-    const tabs = computed(() => [ALL, ...platforms.value.map((p) => p.slug), ACTIVITY, PATCHES, BIOS]);
+    const tabs = computed(() => [ALL, ...platforms.value.map((p) => p.slug), ACTIVITY, PATCHES, BIOS, UPDATES]);
 
     function applyLibrary(data) {
       lib.value = data;
       const withGames = data.platforms.find((p) => p.on_device) || data.platforms[0];
-      if (![ALL, BIOS, ACTIVITY, PATCHES].includes(platform.value) && !data.platforms.some((p) => p.slug === platform.value)) platform.value = withGames?.slug ?? ALL;
+      if (![ALL, BIOS, ACTIVITY, PATCHES, UPDATES].includes(platform.value) && !data.platforms.some((p) => p.slug === platform.value)) platform.value = withGames?.slug ?? ALL;
     }
     async function load(refresh = false) {
       loading.value = true; error.value = null;
@@ -1139,7 +1326,8 @@ const app = createApp({
     window.addEventListener("nav-refresh", () => {
       if (detailOpen.value) return;
       platform.value === BIOS ? loadBios() : platform.value === ACTIVITY ? pollActivity()
-        : platform.value === PATCHES ? loadPatches() : load(true);
+        : platform.value === PATCHES ? loadPatches() : platform.value === UPDATES ? loadUpdates()
+        : load(true);
     });
 
     const size = (b) => b > 1 << 30 ? `${(b / (1 << 30)).toFixed(1)} GB` : b > 1 << 20 ? `${(b / (1 << 20)).toFixed(1)} MB` : `${Math.ceil(b / 1024)} KB`;
@@ -1155,6 +1343,9 @@ const app = createApp({
              playJob, playNow,
              BIOS, bios, biosLoading, biosBusy, biosMessage, confirmBios, biosGet, biosAct, gettable, summary, badge,
              expanded, unavailable, visible,
+             UPDATES, updates, updatesLoading, updatesBusy, updatesMessage,
+             confirmUpdate, confirmPack, confirmCleanup, loadUpdates, packRows, packSummary,
+             packBadge, packNote, packAction, coreAct, packAct, updatePacks, cleanUp,
              PATCHES, patchList, patchesLoading, patchBusy, patchMessage, patchResult, patchAct, patchBadge,
              shownSettings, settingBusy, settingError, setSetting,
              gameSettingsOpen, gamePatches, gamePatchesLoading, gamePatchesMessage, settingsButton,
