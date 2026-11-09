@@ -174,8 +174,10 @@ def test_linux_packing_rejects_a_program_that_is_not_executable(tmp_path):
         proton.pack_plan(folder, tmp_path / "out.squashfs", proton.LINUX)
 
 
-def test_a_linux_game_dir_is_not_hidden_by_the_profile_home_bind(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+def test_a_linux_game_dir_is_not_hidden_by_the_profile_home_bind(monkeypatch):
+    # Path.home() is often under the same temp root in CI, so use a runtime dir that is
+    # definitely outside $HOME; game_dir only computes the path and creates nothing.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/var/tmp/romm-shelf-pytest")
     assert not proton.game_dir("Test Game", proton.LINUX).is_relative_to(Path.home())
     assert proton.game_dir("Test Game", proton.WINDOWS).is_relative_to(Path.home())
 
