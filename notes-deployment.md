@@ -479,38 +479,35 @@ Two workflows. Everything below the "install the tool" step is a script call.
 
 *Built 2026-11-08:* `.github/workflows/ci.yml` runs the contract tests and
 builds the wheel/sdist on every push and pull request, and builds the Nix
-package plus the streaming image on every branch push, tags, manual dispatch,
-or a pull request labelled `build-docker`. It caches `/nix/store` and frees
-runner disk first. A push to `main`, a `v*` tag, or a manual dispatch publishes
-the image with `scripts/publish-docker.sh` to
-`ghcr.io/<owner>/<repo>-webstation`; other branch pushes build with
-`--cache-only`. The core AppImage is built on `main`, tags and manual dispatch.
-`.github/workflows/release.yml` runs on a `v*` tag.
+package plus the streaming image on every branch push, manual dispatch, or a
+pull request labelled `build-docker`. It caches `/nix/store` and frees runner
+disk first. A push to `main` or a manual dispatch publishes the image with
+`scripts/publish-docker.sh` to `ghcr.io/<owner>/<repo>-webstation`; other branch
+pushes build with `--cache-only`. The core AppImage is built on `main` and manual
+dispatch. `.github/workflows/release.yml` owns everything on a `v*` tag.
 
 **`.github/workflows/ci.yml`** — push and pull request:
 
 1. `scripts/test.sh`
 2. `scripts/build-wheel.sh`
 3. `scripts/build-nix.sh`
-4. `scripts/build-appimage.sh` on `main` and tags (too large/slow for every PR
-   without a cache)
-5. `scripts/publish-docker.sh` on `main`, tags and manual dispatch (push to
-   GHCR); `scripts/build-docker.sh --cache-only` on every other branch push or
-   a `build-docker` PR label
+4. `scripts/build-appimage.sh` on `main` and manual dispatch (too large/slow for
+   every PR without a cache)
+5. `scripts/publish-docker.sh` on `main` and manual dispatch; `scripts/build-docker.sh
+   --cache-only` on every other branch push or a `build-docker` PR label
 6. upload `dist/` artifacts
 
-**`.github/workflows/release.yml`** — tag `v*`:
+**`.github/workflows/release.yml`** — tag `v*`, the only tag publisher:
 
 1. `scripts/release.sh` (test, wheel/sdist, AppImage, packs, `SHA256SUMS`,
    `latest.json`)
 2. `scripts/publish-packs.sh` (GHCR, then verify each registry digest)
-3. create the GitHub Release with the AppImage, wheel, sdist, `SHA256SUMS` and
+3. `scripts/publish-docker.sh` (the streaming image, which pulls the same packs
+   at runtime)
+4. create the GitHub Release with the AppImage, wheel, sdist, `SHA256SUMS` and
    `latest.json`
-4. publish the wheel/sdist with PyPI trusted publishing, only when the repository
+5. publish the wheel/sdist with PyPI trusted publishing, only when the repository
    variable `PYPI_PUBLISH` is `true` (v0.1.0 does not set it)
-
-The streaming image is published by `ci.yml` on the same tag; it pulls packs at
-runtime, so it does not need `latest.json` at build time.
 
 The workflows install Nix (and its cache), Docker and `uv`; they do not run
 `nix build`, `uv build` or `docker build` directly.

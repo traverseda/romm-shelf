@@ -33,11 +33,11 @@ jobs:
 
   appimage:
     needs: test
-    # The core AppImage is small but still a Nix build; main and tags are enough.
+    # The core AppImage is small but still a Nix build; main and manual dispatch
+    # are enough. Tags are built by the release workflow.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' &&
-        (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -67,9 +67,9 @@ jobs:
     needs: test
     # The upstream webstation image is large, so every branch push builds it (the
     # Nix cache keeps the package cheap); a pull request builds it only when
-    # labelled "build-docker". Emulators come from GHCR packs at runtime.
+    # labelled "build-docker". Tags are published by the release workflow.
     if: >-
-      github.event_name == 'push' ||
+      (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')) ||
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'build-docker')
     runs-on: ubuntu-latest
@@ -129,8 +129,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] ||
              { [ "${{ github.event_name }}" = "push" ] &&
-               { [ "${{ github.ref }}" = "refs/heads/main" ] ||
-                 [[ "${{ github.ref }}" == refs/tags/v* ]]; }; }; then
+               [ "${{ github.ref }}" = "refs/heads/main" ]; }; then
             echo "yes=true" >> "$GITHUB_OUTPUT"
           else
             echo "yes=false" >> "$GITHUB_OUTPUT"

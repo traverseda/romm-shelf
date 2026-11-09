@@ -446,13 +446,14 @@ update separately through the pack manager.
 ## Release and CI
 
 `latest.json` lives in GitHub Releases. It carries the core AppImage and the
-pinned pack digests. `.github/workflows/release.yml` on a `v*` tag runs
-`scripts/release.sh` (tests, wheel, AppImage, packs, `SHA256SUMS`,
-`latest.json`), then `scripts/publish-packs.sh` pushes and verifies the GHCR
-digests, then creates the GitHub Release and publishes PyPI. `ci.yml` builds the
-core AppImage on `main`, tags and manual dispatch; the streaming image is built
-there too, and installs packs at runtime. The workflows only install tools and
-call scripts.
+pinned pack digests. `.github/workflows/release.yml` is the only tag publisher:
+on a `v*` tag it runs `scripts/release.sh` (tests, wheel, AppImage, packs,
+`SHA256SUMS`, `latest.json`), then `scripts/publish-packs.sh` pushes and verifies
+the GHCR digests, then `scripts/publish-docker.sh` publishes the streaming image,
+then it creates the GitHub Release and optionally publishes PyPI. `ci.yml` builds
+the core AppImage and streaming image on `main`/manual dispatch, and builds
+(cache-only) on other branches. The workflows only install tools and call
+scripts.
 
 GHCR requirements:
 
