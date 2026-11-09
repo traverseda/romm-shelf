@@ -438,7 +438,7 @@ def test_names_from_romm_cannot_escape_the_folder(home):
     assert list(patches.firmware_dir().iterdir()) == []
 
 
-def test_retroarch_saves_state_on_exit_by_default(home, tmp_path):
+def test_retroarch_saves_state_on_exit_and_resumes_on_open(home, tmp_path):
     """design.md § Bundled emulators: a setting like the others, on by default."""
     cfg = home / "emulators/retroarch/retroarch.cfg"
     cfg.parent.mkdir(parents=True)
@@ -449,8 +449,10 @@ def test_retroarch_saves_state_on_exit_by_default(home, tmp_path):
 
     patches.apply(settings, "retroarch")
     assert 'savestate_auto_save = "true"' in cfg.read_text()
+    assert 'savestate_auto_load = "true"' in cfg.read_text()
 
     patches.save_settings("retroarch", {"save_state_on_exit": False})
     patches.apply(settings, "retroarch")
     assert 'savestate_auto_save = "false"' in cfg.read_text()
+    assert 'savestate_auto_load = "true"' in cfg.read_text()
     assert patches.check(settings, "retroarch", patches.find("retroarch")).state == "applied"

@@ -10,7 +10,7 @@
         title: Save state on exit
         description: >-
           RetroArch saves the game's state when it closes, so the state romm-shelf uploads on exit
-          is the one you were playing. It is not loaded again next time.
+          is the one you were playing. It is loaded again when the game next opens.
         default: true
     # Which RetroArch comes from the central `settings` patch.
     target: "{{ retroarch_local_config | expanduser if retroarch == 'external' else retroarch_config }}"
@@ -48,7 +48,7 @@
       sort_savefiles_by_content_enable: "true"
       sort_savestates_by_content_enable: "true"
       savestate_auto_save: "{{ 'true' if save_state_on_exit | bool else 'false' }}"
-      savestate_auto_load: "false"
+      savestate_auto_load: "true"
       system_directory: "{{ bios }}"
   tasks:
     - name: Find RetroArch's config
