@@ -59,6 +59,25 @@ def test_find_prefers_the_exact_desktop_when_two_entries_share_a_name(tmp_path):
     assert hit is not None and hit.appid == 222
 
 
+def test_find_does_not_match_another_rom_with_the_same_display_name(tmp_path):
+    # The native recomp and the emulated release can share a name; the entry's play id says which.
+    desktop = steam.desktop_file(3001)
+    shortcut_file(tmp_path, {
+        "0": {"appid": 111, "AppName": "Wizardry",
+              "Exe": '"romm-shelf"', "LaunchOptions": "play 1524"},
+    })
+    assert steam.find(desktop, "Wizardry", roots=(tmp_path,)) is None
+
+
+def test_find_matches_the_ui_entry_without_a_rom_id(tmp_path):
+    desktop = steam.desktop_file(None)
+    shortcut_file(tmp_path, {
+        "0": {"appid": 111, "AppName": "RomM Shelf", "Exe": '"romm-shelf"', "LaunchOptions": "ui"},
+    })
+    hit = steam.find(desktop, "RomM Shelf", roots=(tmp_path,))
+    assert hit is not None and hit.appid == 111
+
+
 def test_find_falls_back_to_our_executable_and_unsigned_appid(tmp_path):
     desktop = steam.desktop_file(1006)
     shortcut_file(tmp_path, {

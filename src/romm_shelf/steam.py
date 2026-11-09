@@ -143,13 +143,22 @@ def shortcut_files(roots: tuple[Path, ...] | None = None) -> list[Path]:
     return found
 
 
+def _desktop_rom(desktop: Path) -> int | None:
+    """The ROM id a game's .desktop names (`romm-shelf-1006.desktop`), or None for the UI's."""
+    m = _OUR_DESKTOP.search(desktop.name)
+    return int(m.group(1)) if m else None
+
+
 def find(desktop: Path, name: str, roots: tuple[Path, ...] | None = None) -> Shortcut | None:
     """The shortcut for `desktop`, matched by its source .desktop or by our own executable.
 
     The source path is exact, so it wins over the name fallback: two ROMs can share a display name
     (a stale entry for a re-packed game next to the new one), and only the path says which is which.
+    The fallback matches the entry's `play <rom>` too, so another ROM with the same name (a native
+    recomp beside the emulated release) is never mistaken for this one.
     """
     target = str(desktop)
+    rom = _desktop_rom(desktop)
     fallback = None
     for path in shortcut_files(roots):
         try:
@@ -165,8 +174,9 @@ def find(desktop: Path, name: str, roots: tuple[Path, ...] | None = None) -> Sho
             if entry.get("ShortcutPath") == target:
                 return Shortcut(appid & 0xFFFFFFFF, str(entry.get("AppName") or name),
                                 str(entry.get("ShortcutPath", "")), path.parent / "grid")
-            ours = entry.get("AppName") == name and "romm-shelf" in " ".join(
-                str(entry.get(k, "")) for k in ("Exe", "LaunchOptions", "ShortcutPath"))
+            ours = (entry.get("AppName") == name and rom_of(entry) == rom
+                    and "romm-shelf" in " ".join(
+                        str(entry.get(k, "")) for k in ("Exe", "LaunchOptions", "ShortcutPath")))
             if ours and fallback is None:
                 fallback = Shortcut(appid & 0xFFFFFFFF, str(entry.get("AppName") or name),
                                     str(entry.get("ShortcutPath", "")), path.parent / "grid")
