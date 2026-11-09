@@ -81,6 +81,7 @@ jobs:
           scripts/publish-packs.sh
 
       - name: Stage PyPI distributions
+        if: vars.PYPI_PUBLISH == 'true'
         run: |
           mkdir -p dist/pypi
           cp dist/*.whl dist/*.tar.gz dist/pypi/
@@ -105,6 +106,7 @@ jobs:
             "${prerelease[@]}"
 
       - name: Publish to PyPI
+        if: vars.PYPI_PUBLISH == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/pypi

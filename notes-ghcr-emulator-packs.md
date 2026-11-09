@@ -305,8 +305,11 @@ skopeo inspect docker://ghcr.io/<owner>/romm-shelf-pack-retroarch:<version> \
 ```
 
 CI logs in to GHCR with `GITHUB_TOKEN` and `packages: write`. New packages are
-private by default; the workflow or a one-time repository setting must make them
-public for anonymous pulls.
+private by default. GitHub's package REST API has no endpoint that changes a
+container's visibility, so the owner makes each `romm-shelf-pack-*` public in
+Package settings after its first publish (or supplies a token with package
+admin). The pack images carry `org.opencontainers.image.source` so they link
+back to this repository.
 
 ## Pack manager
 

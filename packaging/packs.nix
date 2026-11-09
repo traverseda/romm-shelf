@@ -17,6 +17,8 @@ let
         contents = [ bundle ];
         maxLayers = 120;
         config.Labels = {
+          "org.opencontainers.image.source" = "https://github.com/traverseda/romm-shelf";
+          "org.opencontainers.image.title" = "romm-shelf ${name} emulator pack";
           "org.romm-shelf.pack" = name;
           "org.romm-shelf.emulators" = "${bundle}";
           "org.romm-shelf.version" = packVersion;

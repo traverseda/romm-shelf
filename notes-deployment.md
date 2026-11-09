@@ -506,7 +506,8 @@ the image with `scripts/publish-docker.sh` to
 2. `scripts/publish-packs.sh` (GHCR, then verify each registry digest)
 3. create the GitHub Release with the AppImage, wheel, sdist, `SHA256SUMS` and
    `latest.json`
-4. publish the wheel/sdist with PyPI trusted publishing
+4. publish the wheel/sdist with PyPI trusted publishing, only when the repository
+   variable `PYPI_PUBLISH` is `true` (v0.1.0 does not set it)
 
 The streaming image is published by `ci.yml` on the same tag; it pulls packs at
 runtime, so it does not need `latest.json` at build time.
