@@ -181,6 +181,31 @@ def test_a_traversal_layer_is_rejected(tmp_path, fake):
     assert not (tmp_path / "escape").exists()
 
 
+def test_absolute_layer_paths_are_stripped_and_other_paths_ignored(tmp_path):
+    # dockerTools.buildLayeredImage names members /nix/store/...; the pack cache wants nix/store/...
+    layer = tar_bytes([
+        ("/nix", None, "sym", "/nix/store"),
+        ("/nix/store", None, "dir", None),
+        (f"/nix/store/{STORE}", None, "dir", None),
+        (f"/nix/store/{STORE}/retroarch/default.cfg", b"absolute\n", "file", None),
+        ("/etc/passwd", b"no\n", "file", None),
+    ])
+    fake = fake_image(tmp_path, layer)
+    store = tmp_path / "packs"
+    packs.install(fake.ref, root=store, registry=fake.registry)
+
+    assert (store / "nix/store" / STORE / "retroarch/default.cfg").read_text() == "absolute\n"
+    assert not (store / "etc").exists()
+
+
+def test_an_absolute_traversal_layer_is_rejected(tmp_path):
+    layer = tar_bytes([("/nix/store/../../escape", b"no", "file", None)])
+    fake = fake_image(tmp_path, layer)
+    with pytest.raises(packs.PackError, match="traversal"):
+        packs.install(fake.ref, root=tmp_path / "packs", registry=fake.registry)
+    assert not (tmp_path / "escape").exists()
+
+
 def test_an_existing_store_path_is_left_alone(tmp_path, fake):
     store = tmp_path / "packs"
     (store / "nix/store" / STORE).mkdir(parents=True)

@@ -307,10 +307,14 @@ def layer_present(root: Path, digest: str) -> bool:
 
 
 def _safe_parts(name: str) -> tuple[str, ...] | None:
-    """A tar member's path parts, or None for entries outside nix/store (the image's links)."""
-    name = name.replace("\\", "/")
-    if name.startswith("/"):
-        raise PackError(f"layer has an absolute path: {name}")
+    """A tar member's path parts, or None for entries outside nix/store.
+
+    Docker layers from `dockerTools.buildLayeredImage` name their members with absolute paths
+    (`/nix/store/...`), while some are relative. Both forms are accepted; leading slashes are
+    stripped so extraction stays below the cache root. Entries outside `nix/store` (the image's
+    `/nix` links, `/etc`, and so on) are ignored.
+    """
+    name = name.replace("\\", "/").lstrip("/")
     parts = tuple(p for p in PurePosixPath(name).parts if p not in ("", "."))
     if any(p == ".." for p in parts):
         raise PackError(f"layer has a traversal path: {name}")
@@ -375,8 +379,8 @@ def extract_layer(data: bytes, root: Path | str | None, digest: str) -> tuple[st
     """Extract one layer's nix/store entries, skipping store paths that already exist.
 
     Everything is unpacked under a temporary directory first, so a failed tar leaves the cache as
-    it was. Only `nix/store/<name>` is honoured; absolute paths, `..`, devices and writes through
-    symlinks are rejected.
+    it was. Only `nix/store/<name>` is honoured (absolute or relative); other paths, `..`, devices
+    and writes through symlinks are rejected or ignored.
     """
     root = store_root(root)
     root.mkdir(parents=True, exist_ok=True)
