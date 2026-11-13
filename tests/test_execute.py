@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from romm_shelf.adapters import load_adapters
 from romm_shelf.execute import BACKUP_DIR, STATE_LABEL, backup, plan_saves, plan_states, run
@@ -85,7 +86,9 @@ def test_backup_keeps_a_path_that_is_outside_the_layout(layout, tmp_path):
     outside.write_bytes(b"old")
     backed_up = backup(outside, layout.saves, "stamp")
     assert backed_up.read_bytes() == b"old"
-    assert backed_up.relative_to(layout.saves / BACKUP_DIR / "stamp").parts[:2] == ("external", "tmp")
+    # The whole absolute path, below `external/`: pytest's tmp_path is under /tmp here and
+    # under /home on a GitHub runner, so compare against the real path, not a fixed prefix.
+    assert backed_up.relative_to(layout.saves / BACKUP_DIR / "stamp") == Path("external", *outside.parts[1:])
     assert backed_up.name == "ironwail.cfg"
 
 
