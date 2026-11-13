@@ -17,4 +17,13 @@ if [ -n "${ROMM_SHELF_PACKS_AUTO:-}" ]; then
   done
 fi
 
+# This runs as root, before /init drops to abc (PUID:PGID), but games run as abc
+# and write their saves and overlays under /config/romm-shelf. Hand the tree
+# over, touching only what is wrong so a normal start is just a stat walk.
+shelf=/config/romm-shelf
+uid=${PUID:-911}
+gid=${PGID:-911}
+mkdir -p "$shelf"
+find "$shelf" \( ! -user "$uid" -o ! -group "$gid" \) -exec chown -h "$uid:$gid" {} +
+
 exec /init "$@"
