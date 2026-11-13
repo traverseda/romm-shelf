@@ -253,12 +253,53 @@ def save_root(layout: RetroDeckLayout, key: str, platform: str = PLATFORM) -> Pa
     return layout.saves / platform / key
 
 
-def overlay_root(layout: RetroDeckLayout, key: str, platform: str = PLATFORM) -> Path:
+def game_data_root(key: str, platform: str = PLATFORM) -> Path:
+    """Per-device tree for one packaged game's generated data. Never uploaded to RomM."""
+    return data_home() / "romm-shelf" / "overlays" / platform / key
+
+
+def overlay_root(key: str, platform: str = PLATFORM) -> Path:
+    """The persistent overlay upper layer: config, caches and saves written to the game folder.
+
+    It lives outside the layout, so it is never discovered by a sync and survives uninstall.
+    """
+    return game_data_root(key, platform) / "upper"
+
+
+def overlay_work(key: str, platform: str = PLATFORM) -> Path:
+    """Scratch space overlayfs needs on the upper's filesystem; cleared before every mount."""
+    return game_data_root(key, platform) / "work"
+
+
+def legacy_overlay_root(layout: RetroDeckLayout, key: str, platform: str = PLATFORM) -> Path:
+    """Where older versions kept the upper: inside the save tree, as `<base>`."""
     return save_root(layout, key, platform) / "base"
+
+
+def overlay_move(layout: RetroDeckLayout, key: str,
+                 platform: str = PLATFORM) -> tuple[Path, Path] | None:
+    """The one-time move from the save tree to the per-device game overlay, when needed."""
+    old = legacy_overlay_root(layout, key, platform)
+    new = overlay_root(key, platform)
+    return (old, new) if old.is_dir() and not new.exists() else None
 
 
 def profile_root(layout: RetroDeckLayout, key: str, platform: str = PLATFORM) -> Path:
     return save_root(layout, key, platform) / "profile"
+
+
+def profile_adoption(profile: Path, prefix: Path) -> tuple[Path, Path] | None:
+    """Adopt an existing prefix's user folder into the profile before the profile is bound.
+
+    A game that never needed the profile wrote generated data into the prefix; binding an
+    empty profile would hide it. Copy once, when the profile has nothing yet.
+    """
+    user = prefix / "drive_c/users/steamuser"
+    if not user.is_dir() or not any(user.iterdir()):
+        return None
+    if profile.exists() and any(profile.iterdir()):
+        return None
+    return user, profile
 
 
 def prefix_root(key: str, platform: str = PLATFORM) -> Path:
@@ -294,14 +335,14 @@ def placeholders(path: Path, layout: RetroDeckLayout, platform: str = PLATFORM) 
     profile = profile_root(layout, key, platform)
     if platform == LINUX:
         return {
-            "<base>": str(saves / "base"),
+            "<base>": str(overlay_root(key, platform)),
             "<home>": str(profile),
             "<xdgData>": str(profile / ".local/share"),
             "<xdgConfig>": str(profile / ".config"),
             "<osUserName>": getpass.getuser(),
         }
     return {
-        "<base>": str(saves / "base"),
+        "<base>": str(overlay_root(key, platform)),
         "<home>": str(profile),
         "<osUserName>": "steamuser",
         "<winAppData>": str(profile / "AppData/Roaming"),
@@ -357,6 +398,22 @@ def save_slots(game: ProtonGame, path: Path, layout: RetroDeckLayout,
             for match in matches:
                 slots[slot_name(template, match.relative_to(base).as_posix())] = match
     return slots
+
+
+def save_folders(game: ProtonGame, path: Path, layout: RetroDeckLayout,
+                 platform: str | None = None) -> tuple[Path, ...]:
+    """The folders holding this game's saves: each `save` entry's folder, or a glob's base.
+
+    What a streaming session archives (notes-deployment.md § Route 5), so only saves travel, as
+    with a sync: never config or caches. A folder inside another listed one is left out."""
+    platform = platform or game.platform
+    folders: list[Path] = []
+    for template in game.saves:
+        resolved = expand_path(template, path, layout, platform)
+        folder = native.glob_base(resolved) if glob.has_magic(str(resolved)) else resolved.parent
+        if folder not in folders:
+            folders.append(folder)
+    return tuple(f for f in folders if not any(f != o and f.is_relative_to(o) for o in folders))
 
 
 def squashfs_saves(path: Path, layout: RetroDeckLayout, platform: str = PLATFORM,
@@ -476,10 +533,29 @@ def find_proton(roots: tuple[Path, ...] | None = None, env: dict | None = None) 
             for candidate in tools.iterdir():
                 if (script := _proton_script(candidate)) is not None:
                     found.append((script, root, _mtime(candidate)))
+    if not found and roots is None and (pack := _pack(PROTON_PACK)) is not None:
+        # No Steam here (the streaming image): the `proton` pack's GE-Proton. Proton only reads
+        # Steam client files from the client root when they exist, so the pack folder stands in.
+        if (script := _proton_script(pack)) is not None:
+            return Proton(script, pack)
     if not found:
-        raise FileNotFoundError("no Steam Proton found; install one in Steam or set ROMM_SHELF_PROTON")
+        raise FileNotFoundError("no Steam Proton found; install one in Steam, install the proton pack "
+                                "(`romm-shelf packs install proton`) or set ROMM_SHELF_PROTON")
     script, root, _ = max(found, key=lambda item: item[2])
     return Proton(script, root)
+
+
+PROTON_PACK = "proton"
+STEAM_RUNTIME_PACK = "steam-runtime"
+
+
+def _pack(name: str) -> Path | None:
+    """An installed runtime pack's folder, or None when it isn't installed or can't be read."""
+    from romm_shelf import packs
+    try:
+        return packs.installed_component(name)
+    except (packs.PackError, OSError, ValueError):
+        return None
 
 
 def _mtime(path: Path) -> float:
@@ -489,12 +565,15 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
-def proton_runner(env: dict | None = None) -> list[str]:
+def proton_runner(env: dict | None = None, roots: tuple[Path, ...] | None = None,
+                  proton: Proton | None = None) -> list[str]:
     """The command prefix Proton needs outside Steam, or [] when it runs directly.
 
     ROMM_SHELF_PROTON_RUNNER wins. A Steam runtime already in the environment needs none.
     Otherwise `steam-run` (NixOS) gives Proton the FHS environment it expects; without it Wine
-    starts but never opens a window (todo.md)."""
+    starts but never opens a window (todo.md). Then the Steam Linux Runtime, as Steam itself runs
+    Proton: the one the Proton build names (`required_runtime`), from Steam's own install or the
+    `steam-runtime` pack (the streaming image)."""
     environ = os.environ if env is None else env
     if override := environ.get("ROMM_SHELF_PROTON_RUNNER"):
         return shlex.split(override)
@@ -502,28 +581,63 @@ def proton_runner(env: dict | None = None) -> list[str]:
         return []
     if shutil.which("steam-run", path=environ.get("PATH", "")):
         return ["steam-run"]
-    return []
+    required = required_runtime(proton) if proton is not None else None
+    return _steam_runtime(roots, (required,) if required else STEAM_RUNTIMES)
 
 
-def proton_command(proton: Proton, env: dict | None = None) -> list[str]:
-    """The Proton script, plus a runtime wrapper such as `steam-run` on NixOS."""
-    return [*proton_runner(env), str(proton.script)]
+# Steam's tool app ids for its runtimes, as a Proton build's toolmanifest.vdf names the one it needs.
+RUNTIME_APPS = {
+    "1391110": "SteamLinuxRuntime_soldier",
+    "1628350": "SteamLinuxRuntime_sniper",
+    "4183110": "SteamLinuxRuntime_4",
+}
+
+
+def required_runtime(proton: Proton) -> str | None:
+    """The Steam Linux Runtime folder this Proton build runs in, from its toolmanifest.vdf.
+
+    Current Proton (10+, GE-Proton 11) needs runtime 4: its script uses Python the sniper runtime
+    doesn't have. None when the manifest names no runtime romm-shelf knows."""
+    try:
+        text = (proton.script.parent / "toolmanifest.vdf").read_text(errors="replace")
+    except OSError:
+        return None
+    found = re.search(r'"require_tool_appid"\s+"(\d+)"', text)
+    return RUNTIME_APPS.get(found.group(1)) if found else None
 
 
 # Linux runtime. A prebuilt native game needs an FHS-like environment on NixOS, and
 # SteamOS gives one through the Steam Linux Runtime. An explicit prefix wins; then an
-# already-supplied Steam runtime; then steam-run; then a Steam Linux Runtime install.
+# already-supplied Steam runtime; then steam-run; then a Steam Linux Runtime install,
+# Steam's own or the `steam-runtime` pack.
 
-STEAM_RUNTIMES = ("SteamLinuxRuntime_sniper", "SteamLinuxRuntime_soldier", "SteamLinuxRuntime")
+STEAM_RUNTIMES = ("SteamLinuxRuntime_sniper", "SteamLinuxRuntime_soldier", "SteamLinuxRuntime",
+                  "SteamLinuxRuntime_4")
+"""For a native game, best first. A Proton build names its own (`required_runtime`)."""
 
 
-def _steam_runtime(roots: tuple[Path, ...] | None = None) -> list[str]:
-    for root in ([p.expanduser() for p in steam.STEAM_ROOTS] if roots is None else roots):
-        for name in STEAM_RUNTIMES:
-            entry = root / "steamapps/common" / name / "run"
+def _steam_runtime(roots: tuple[Path, ...] | None = None,
+                   names: tuple[str, ...] = STEAM_RUNTIMES) -> list[str]:
+    folders = [p.expanduser() / "steamapps/common" for p in steam.STEAM_ROOTS] if roots is None \
+        else [root / "steamapps/common" for root in roots]
+    if roots is None and (pack := _pack(STEAM_RUNTIME_PACK)) is not None:
+        folders.append(pack)  # laid out like steamapps/common
+    for folder in folders:
+        for name in names:
+            entry = folder / name / "run"
             if entry.is_file():
                 return [str(entry), "--"]
     return []
+
+
+def _is_steam_runtime(runner: list[str]) -> bool:
+    runtime = Path(runner[0]) if runner else None
+    return runtime is not None and runtime.is_absolute() and runtime.parent.name.startswith("SteamLinuxRuntime")
+
+
+def proton_command(proton: Proton, env: dict | None = None) -> list[str]:
+    """The Proton script, plus a runtime wrapper: `steam-run` on NixOS, or the Steam Linux Runtime."""
+    return [*proton_runner(env, proton=proton), str(proton.script)]
 
 
 def native_runner(env: dict | None = None, roots: tuple[Path, ...] | None = None) -> list[str]:
@@ -536,12 +650,6 @@ def native_runner(env: dict | None = None, roots: tuple[Path, ...] | None = None
     if shutil.which("steam-run", path=environ.get("PATH")):
         return ["steam-run"]
     return _steam_runtime(roots)
-
-
-def needs_profile(game: ProtonGame) -> bool:
-    return any(name in template for template in game.saves
-               for name in ("<home>", "<winAppData>", "<winLocalAppData>", "<winLocalAppDataLow>",
-                            "<winDocuments>", "<osUserName>"))
 
 
 def needs_public(game: ProtonGame) -> bool:
@@ -562,8 +670,9 @@ def run_plan(settings, layout: RetroDeckLayout, path: Path,
     key = game.key
     saves = save_root(layout, key, platform)
     profile = profile_root(layout, key, platform)
-    upper = overlay_root(layout, key, platform)
-    work = saves / ".overlay-work"
+    upper = overlay_root(key, platform)
+    work = overlay_work(key, platform)
+    move = overlay_move(layout, key, platform)
     lower = mount_root(key, platform)
     game_dir_path = game_dir(key, platform)
     mount = native.Mount(
@@ -581,30 +690,42 @@ def run_plan(settings, layout: RetroDeckLayout, path: Path,
     args = ["--dev-bind", "/", "/", "--die-with-parent",
             "--overlay-src", str(lower), "--overlay", str(upper), str(work), str(game_dir_path)]
     dirs = [profile, upper, work, prefix_root(key, platform), lower, game_dir_path]
+    copies = ()
 
     if platform == WINDOWS:
         proton = find_proton()
         prefix = pfx_root(key)
-        if needs_profile(game):
-            args += ["--bind", str(profile), str(prefix / "drive_c/users/steamuser")]
+        if adopt := profile_adoption(profile, prefix):
+            copies = (adopt,)
+        # Always give Windows games the per-game profile: config, caches and any other
+        # generated data written under the user folder then stays on this device instead
+        # of living in the disposable prefix.
+        args += ["--bind", str(profile), str(prefix / "drive_c/users/steamuser")]
         if needs_public(game):
             args += ["--bind", str(saves / "public"), str(prefix / "drive_c/users/Public")]
             dirs.append(saves / "public")
         if needs_programdata(game):
             args += ["--bind", str(saves / "programdata"), str(prefix / "drive_c/ProgramData")]
             dirs.append(saves / "programdata")
-        command = [*proton_command(proton), "run", f"{game_dir_path}/{program}", *game.args]
+        runner = proton_runner(proton=proton)
+        if _is_steam_runtime(runner):
+            # As Steam runs Proton. The prefix and game dir are under $HOME, which pressure-vessel
+            # shares; the mounted archive under XDG_RUNTIME_DIR is not, so pass it through.
+            runner = [runner[0], f"--filesystem={runtime_dir() / platform / key}", *runner[1:]]
+        command = [*runner, str(proton.script), "run", f"{game_dir_path}/{program}", *game.args]
         env = {
             "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(proton.root),
             "STEAM_COMPAT_DATA_PATH": str(prefix_root(key, platform)),
             "STEAM_COMPAT_INSTALL_PATH": str(game_dir_path),
+            # As Steam sets it: pressure-vessel shares the STEAM_COMPAT_* paths with the
+            # container, so Proton is visible wherever it is installed, not only under $HOME.
+            "STEAM_COMPAT_TOOL_PATHS": str(proton.script.parent),
         }
     else:
         home = Path.home()
         runner = native_runner()
-        runtime = Path(runner[0]) if runner else None
-        if runtime is not None and runtime.is_absolute() and \
-                runtime.parent.name.startswith("SteamLinuxRuntime"):
+        if _is_steam_runtime(runner):
+            runtime = Path(runner[0])
             # pressure-vessel does not expose XDG_RUNTIME_DIR, so the mounted archive and the
             # game dir are invisible to the game unless they are passed through. And the profile
             # is bound over $HOME below, which hides a runtime installed there: stage it outside
@@ -626,6 +747,7 @@ def run_plan(settings, layout: RetroDeckLayout, path: Path,
             "XDG_CACHE_HOME": str(home / ".cache"),
             "XDG_STATE_HOME": str(home / ".local/state"),
         }
+    if platform == LINUX:
         if program.lower().endswith(".appimage"):
             # An AppImage mounts itself with FUSE, which bwrap's user namespace and
             # pressure-vessel's NoNewPrivs both break. Extract and run it instead.
@@ -634,7 +756,7 @@ def run_plan(settings, layout: RetroDeckLayout, path: Path,
     args += ["--chdir", f"{game_dir_path}/{workdir}" if workdir else str(game_dir_path),
              "--", *command]
     return RunPlan(tool("bwrap"), tuple(args), env, path.parent, {}, dirs=tuple(dirs),
-                   mounts=(mount,))
+                   mounts=(mount,), copies=copies, moves=(move,) if move else ())
 
 
 # Packaging and uploading. Only squashfs archives go to RomM.

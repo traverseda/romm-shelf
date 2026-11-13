@@ -286,7 +286,47 @@ owner decision); the cache lives in `/config` and survives container updates.
 `dist/docker-context` and runs buildx for linux/amd64. The image no longer
 carries the emulator closure, so it stays close to the upstream base size.
 `--cache-only` builds without exporting the image, which is how CI avoids the
-runner disk. The broker launcher integration is still open (todo.md).
+runner disk.
+
+### Packaged Linux and Windows games (2026-11-13)
+
+Upstream maps every platform to one launcher class in the broker's `REGISTRY`.
+The image adds one more the same way: `packaging/docker/broker/romm_shelf_games.py`
+is copied into `webstation_broker.emulators` and registered as `romm-shelf`. It
+runs a `win` or `linux` `.squashfs` (design.md § Native games, § Windows games)
+through `romm-shelf native run ARCHIVE --platform P`, the CLI equivalent: the
+same mount, overlay and profile as `play`, with no RomM lookup and no sync.
+
+- **Runtimes:** two more GHCR packs built by Nix, `proton` (GE-Proton from
+  nixpkgs' `proton-ge-bin`) and `steam-runtime` (Valve's Steam Linux Runtime
+  3.0 *sniper* and 4.0, pinned depot builds). With no Steam in the container,
+  romm-shelf falls back to them. Proton runs in the runtime its
+  `toolmanifest.vdf` names (`require_tool_appid`), as Steam does: GE-Proton 11
+  needs runtime 4, and its script fails in sniper. Linux games run in sniper.
+  Runtime packs copy their files instead of linking into the store, and every
+  pack extracts owner-writable, as a Steam install is (pressure-vessel locks
+  `files/.ref` read-write and writes into its copy of the runtime).
+- **Saves:** the broker carries them, as for every launcher. At activate the
+  launcher asks `romm-shelf native saves ARCHIVE` for the folders the manifest's
+  `save` entries live in; those are its `save_subtrees`, so only saves travel,
+  never config or caches. They are cleared at activate (`clears_stale_saves`),
+  restored from the player's archive, and dumped at exit. RomM files the dump as
+  `[romm-shelf <time>].saves.zip` under the launcher's own name, so it never
+  collides with the per-slot `proton`/`native` saves romm-shelf syncs elsewhere.
+  Moving saves between a stream and the Deck is open (todo.md).
+- **Paths:** romm-shelf's root, data home and `HOME` are all under
+  `/config/romm-shelf`. It gets its own `HOME` because a Linux game's profile is
+  bound over `$HOME`, and the container's home, `/config`, also holds
+  `XDG_RUNTIME_DIR` (the display and audio sockets) and the packs.
+- **Verified 2026-11-13** on azrael (Intel GPU) with the upstream
+  `webstation:romm` base and the broker API: Arcane Dimensions (`win`) under
+  GE-Proton 11 in runtime 4, and The Wind Waker HD Recomp (`linux`) in sniper,
+  both drawing in the Selkies desktop; exit stops the game and unmounts the
+  archive; a save written in one session was archived alone, cleared for the
+  next player and restored from the archive. Runtimes were mounted from the Nix
+  build rather than pulled from GHCR, which has no `proton`/`steam-runtime` pack
+  until the next release. Not yet tried: a launch from RomM's own UI, a
+  controller through Selkies, a 32-bit Windows game.
 
 ### Container contract
 
@@ -304,9 +344,19 @@ services:
       - SUBFOLDER=/streaming/
       - BROKER_SECRET=${STREAMING_BROKER_SECRET:?set me}
       # Comma-separated emulator packs from GHCR; empty installs none.
-      - ROMM_SHELF_PACKS_AUTO=retroarch,dolphin,pcsx2,ppsspp,rpcs3,azahar,cemu
+      # proton and steam-runtime run packaged Windows and Linux games.
+      - ROMM_SHELF_PACKS_AUTO=retroarch,dolphin,pcsx2,ppsspp,rpcs3,azahar,cemu,proton,steam-runtime
     devices:
       - /dev/dri:/dev/dri
+      - /dev/fuse:/dev/fuse        # squashfuse mounts a packaged game
+    # bwrap (packs, packaged games, the Steam Linux Runtime) needs user
+    # namespaces, which Docker's default seccomp and AppArmor profiles block;
+    # squashfuse needs SYS_ADMIN to mount. Tested on the upstream base.
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
     volumes:
       - ./webstation:/config
       - /path/to/romm/library:/romm/library:ro
@@ -321,6 +371,10 @@ services:
 - `/romm/library` is read-only; activate refuses ROM paths outside `ROM_ROOT`.
 - `/dev/dri` is the GPU render node; software rendering is not a supported
   streaming target.
+- `/dev/fuse`, `SYS_ADMIN` and unconfined seccomp/AppArmor are for bwrap and
+  squashfuse. Without them no pack-backed emulator and no packaged game runs;
+  upstream's own emulators still do. They widen what a compromised game can
+  reach in the container; see Security.
 - One session per container. More concurrent sessions mean more containers.
 - The official image is amd64 only, matching our x86_64 constraint.
 
@@ -343,6 +397,12 @@ streaming:
         ngc:
           emulator: dolphin
           memory_card_sync: true
+        win:
+          emulator: romm-shelf
+          label: Windows
+        linux:
+          emulator: romm-shelf
+          label: Linux
 ```
 
 The emulator names in `platforms:` must be the names the broker's launchers

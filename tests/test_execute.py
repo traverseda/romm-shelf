@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 from romm_shelf.adapters import load_adapters
-from romm_shelf.execute import BACKUP_DIR, STATE_LABEL, plan_saves, plan_states, run
+from romm_shelf.execute import BACKUP_DIR, STATE_LABEL, backup, plan_saves, plan_states, run
 from romm_shelf.library import match, scan_local
 from romm_shelf.romm import NegotiateResponse, ServerState
 from romm_shelf.sync import inventory
@@ -77,6 +77,16 @@ def test_download_backs_up_then_replaces(layout, remote):
     assert backed_up.read_bytes() == before
     assert backed_up.relative_to(layout.saves / BACKUP_DIR).parts[1:] == ("nes", WIZ)
     assert client.calls[-1] == ("complete", 7, {"completed": 1, "failed": 0})
+
+
+def test_backup_keeps_a_path_that_is_outside_the_layout(layout, tmp_path):
+    outside = tmp_path / "data/romm-shelf/overlays/win/Test Game/upper/qbj3/ironwail.cfg"
+    outside.parent.mkdir(parents=True)
+    outside.write_bytes(b"old")
+    backed_up = backup(outside, layout.saves, "stamp")
+    assert backed_up.read_bytes() == b"old"
+    assert backed_up.relative_to(layout.saves / BACKUP_DIR / "stamp").parts[:2] == ("external", "tmp")
+    assert backed_up.name == "ironwail.cfg"
 
 
 def _state(id, labels, updated_at, file_name="from_below_2020_09_16_v_1_0_0.state.auto"):

@@ -16,7 +16,7 @@ fi
 PLAN=0
 
 # The packs a release publishes. The AppImage and the streaming image both pull these names.
-PACK_NAMES_DEFAULT="retroarch dolphin pcsx2 ppsspp rpcs3 azahar cemu eden"
+PACK_NAMES_DEFAULT="retroarch dolphin pcsx2 ppsspp rpcs3 azahar cemu eden proton steam-runtime"
 PACK_NAMES=${ROMM_SHELF_PACKS:-$PACK_NAMES_DEFAULT}
 
 die() {

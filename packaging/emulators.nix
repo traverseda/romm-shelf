@@ -12,15 +12,33 @@
 # eden/{bin/eden, lib, default/qt-config.ini}.
 { lib, runCommand, writeShellScript, writeText, nixgl, libglvnd, retroarch-bare, libretro, libretro-core-info, retroarch-assets,
   retroarch-joypad-autoconfig, libretro-shaders-slang, dolphin-emu, pcsx2, ppsspp, rpcs3, azahar, cemu,
-  eden, bubblewrap, squashfuse, squashfsTools, fuse3, components ? null }:
+  eden, bubblewrap, squashfuse, squashfsTools, fuse3, proton-ge-bin, fetchurl, components ? null }:
 
 let
   # A component is one emulator's folder in the bundle. The full bundle (null) also carries the
   # native/Proton tools; a single-component bundle is what an OCI pack image wraps.
   allComponents = [ "retroarch" "dolphin" "pcsx2" "ppsspp" "rpcs3" "azahar" "cemu" "eden" ];
+  # Runtimes for packaged games (design.md § Native games, § Windows games). Pack-only: a desktop
+  # host already has Steam's own Proton and Steam Linux Runtime; the streaming image has no Steam.
+  # Their files are copied, not linked, so they run from wherever a pack is extracted.
+  runtimeComponents = [ "proton" "steam-runtime" ];
   selected = if components == null then allComponents else components;
   want = name: builtins.elem name selected;
   withTools = components == null;
+  # Valve's Steam Linux Runtimes, the containers Steam runs games in: 3.0 (sniper) for native
+  # games, and 4.0, which current Proton names in its toolmanifest.vdf (require_tool_appid
+  # 4183110). Pinned to stable depot builds; nixpkgs doesn't package them.
+  sniperVersion = "3.0.20261021.266025";
+  sniper = fetchurl {
+    url = "https://repo.steampowered.com/steamrt-images-sniper/snapshots/${sniperVersion}/SteamLinuxRuntime_sniper.tar.xz";
+    sha256 = "86956ad0ee62e89134f5e30359cd1019d1ecb614c7b677dad82d4d00f51a2696";
+  };
+  steamrt4Version = "4.0.20261021.265997";
+  steamrt4 = fetchurl {
+    url = "https://repo.steampowered.com/steamrt4/images/${steamrt4Version}/SteamLinuxRuntime_4.tar.xz";
+    sha256 = "aa9dd1aab2173e65b631faae34b85e2c17fe323d941013154ddd2e1dce8a0910";
+  };
+  steamRuntimeVersion = "${sniperVersion}+${steamrt4Version}";
   versions = {
     retroarch = retroarch-bare.version;
     dolphin = dolphin-emu.version;
@@ -30,6 +48,8 @@ let
     azahar = azahar.version;
     cemu = cemu.version;
     eden = eden.version;
+    proton = proton-ge-bin.version;
+    steam-runtime = steamRuntimeVersion;
   };
 
   # Exactly the cores romm_shelf_retroarch declares: file stem -> nixpkgs package. The systems
@@ -510,5 +530,24 @@ runCommand "romm-shelf-emulators${if components == null then "" else "-" + lib.c
   ln -s ${edenWrapper} $edenOut/bin/eden
   ln -s ${libglvnd}/lib $edenOut/lib
   cp ${edenIni} $edenOut/default/qt-config.ini
+  ''}
+
+  ${lib.optionalString (want "proton") ''
+  # GE-Proton, a Steam compatibility tool: proton (the script), files/ and the rest, copied whole.
+  # Run inside the Steam Linux Runtime below, as Steam runs it (proton.py).
+  cp -rL ${proton-ge-bin.steamcompattool} $out/proton
+  chmod -R u+w $out/proton
+  [ -x $out/proton/proton ] || { echo "no proton script in proton-ge-bin"; exit 1; }
+  ''}
+
+  ${lib.optionalString (want "steam-runtime") ''
+  # The Steam Linux Runtimes, as Steam lays them out in steamapps/common:
+  # steam-runtime/SteamLinuxRuntime_sniper/ and steam-runtime/SteamLinuxRuntime_4/, each with run.
+  mkdir -p $out/steam-runtime
+  tar -xJf ${sniper} -C $out/steam-runtime
+  tar -xJf ${steamrt4} -C $out/steam-runtime
+  for rt in SteamLinuxRuntime_sniper SteamLinuxRuntime_4; do
+    [ -x $out/steam-runtime/$rt/run ] || { echo "no run in $rt"; exit 1; }
+  done
   ''}
 ''

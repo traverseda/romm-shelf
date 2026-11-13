@@ -5,7 +5,9 @@ the device credential (see auth.py).
 """
 
 import os
+import shutil
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -61,9 +63,33 @@ def play_log(rom_id: int) -> Path:
     return root / f"play-{rom_id}.log"
 
 
+DISPLAY_ENV = ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY")
+
+
+def session_display() -> dict[str, str]:
+    """The graphical session's display variables, from the systemd user manager.
+
+    The background service can start before the desktop session has pushed its display into the
+    manager, and then every game it launches inherits none: Wine runs, but with no window to show.
+    The manager has them by the time anyone launches a game, so ask it."""
+    if not shutil.which("systemctl"):
+        return {}
+    try:
+        out = subprocess.run(["systemctl", "--user", "show-environment"], capture_output=True,
+                             text=True, timeout=5, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    pairs = (line.partition("=") for line in out.splitlines())
+    return {k: v for k, _, v in pairs if k in DISPLAY_ENV and v}
+
+
 def host_env(extra: dict[str, str] | None = None) -> dict[str, str]:
-    """This process's environment without the AppImage runtime's variables, for programs it starts."""
+    """This process's environment without the AppImage runtime's variables, for programs it starts.
+
+    A process with no display of its own borrows the session's (see session_display)."""
     env = {k: v for k, v in os.environ.items() if k not in APPIMAGE_ENV and not k.startswith("APPIMAGE_")}
+    if not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
+        env = {**session_display(), **env}
     return {**env, **(extra or {})}
 
 

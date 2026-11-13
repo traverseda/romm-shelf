@@ -31,6 +31,12 @@ The rest of this document follows from that rule:
   Losing it means pairing again. It never means losing data. A disposable launch
   index also lives in `$XDG_CACHE_HOME/romm-shelf/` (see [Offline](#offline));
   deleting it only costs an offline launch until the next match rebuilds it.
+- **Generated game data is per device.** Packaged games write config, caches and
+  anything else into a persistent per-game overlay under
+  `~/.local/share/romm-shelf/overlays/<platform>/<name>/`. It is deliberately
+  outside RetroDECK's save tree and is never uploaded: it belongs to the device
+  that made it, and deleting it only costs that game's local settings. Only
+  manifest paths tagged `save` go to RomM (§ Native games, § Windows games).
 
 ## Controller rule
 
@@ -941,8 +947,9 @@ alternatives. An emulator added this way (Eden, for Switch) is one patch
 *Status: tentatively approved 2026-11-06; folder ROMs from 2026-11-07; changed
 2026-11-08 (owner) to one squashfs archive per game — the same pipeline as
 Windows games, run through `steam-run` or the Steam Linux Runtime instead of
-Proton. The two existing Linux folder ROMs were repacked as squashfs and are
-installed on azrael; not yet run on the Deck. Open decisions are in todo.md.*
+Proton. The two existing Linux folder ROMs were repacked as squashfs; on the Deck
+both launch from Steam shortcuts and sync their saves (owner, 2026-11-13). Open
+decisions are in todo.md.*
 
 A static recompilation is a native Linux game built from the user's own game
 files: no emulator, ROM or RetroDECK component. Two work so far: TotK Recomp on
@@ -984,12 +991,17 @@ project's own setup; romm-shelf starts from a finished folder.
 
   ```
   saves/linux/<name>/profile/   -> $HOME inside the run (bwrap bind)
-  saves/linux/<name>/base/      -> overlay upper layer for writes next to the program
   ```
 
+  The writable overlay over the archive is per device, not per save:
+  `~/.local/share/romm-shelf/overlays/linux/<name>/upper/`. It holds every
+  write next to the program, so config and caches survive between launches
+  without ever being synced. `<base>` is that upper; older versions kept it at
+  `saves/linux/<name>/base/` and the first launch moves it across.
+
   `<home>` is `profile/`; `<xdgData>` and `<xdgConfig>` are
-  `profile/.local/share` and `profile/.config`; `<osUserName>` is the real user;
-  `<base>` is the overlay upper, as for Windows. A folder save is one zip, as for
+  `profile/.local/share` and `profile/.config`; `<osUserName>` is the real user.
+  A folder save is one zip, as for
   any other emulator. Paths using placeholders outside that list (including
   `<root>`) are skipped, like Windows' `<storeUserId>`. Only installed games are
   handled: a game that isn't installed has no local manifest, so its saves are not
@@ -1003,8 +1015,9 @@ project's own setup; romm-shelf starts from a finished folder.
   runner is `ROMM_SHELF_NATIVE_RUNNER`
   when set; otherwise none when Steam already supplied a runtime
   (`STEAM_RUNTIME`/`PRESSURE_VESSEL_RUNTIME`), then `steam-run` (NixOS), then a
-  Steam Linux Runtime installation (`SteamLinuxRuntime_sniper`, `_soldier` or
-  `SteamLinuxRuntime`), then direct. The Steam shortcut (`romm-shelf shortcut
+  Steam Linux Runtime installation (`SteamLinuxRuntime_sniper`, `_soldier`,
+  `SteamLinuxRuntime` or `_4`, in Steam's install or the `steam-runtime` pack),
+  then direct. The Steam shortcut (`romm-shelf shortcut
   <rom>`) points at `play`, because a Steam launch runs no ES-DE hooks. The sync
   before sleep covers these saves too. If the pull fails (no network), it warns and
   runs the game anyway, as the hooks do. On NixOS a **Steam-launched** `play`
@@ -1018,11 +1031,9 @@ project's own setup; romm-shelf starts from a finished folder.
   and the raw source data. It keeps the ROM's own file name. Do it before the
   Switch release is removed: the recomp is then the single source of truth.
   `native pack --upload` applies a manifest's `romm-shelf.metadata` automatically.
-- **Not proven yet:** on the Deck, that the nested bwrap/`steam-run` path works,
-  that the Steam Linux Runtime entry point is the right one for a non-Steam
-  shortcut, and that binding the profile over `$HOME` doesn't break a game that
-  needs shared host data. The two installed folder ROMs were repacked as
-  squashfs on 2026-11-08.
+- **On the Deck:** TotK and BotW (ROMs 3002, 3001) launch from Steam shortcuts
+  and their saves sync (owner, 2026-11-13). Not proven yet: that binding the
+  profile over `$HOME` doesn't break a game that needs shared host data.
 
 ### Windows games (Proton)
 
@@ -1051,33 +1062,45 @@ restore). See [winapps.md](winapps.md) for the step-by-step recipe.*
   runs it through **Steam Proton**, inside bubblewrap. bwrap gives the game a
   writable overlay layer over the archive, so writes next to the executable don't
   change the ROM. Proton is found in Steam's install: `Proton - Experimental`
-  first, then the newest installed Proton or `compatibilitytools.d` tool;
-  `ROMM_SHELF_PROTON` overrides it. There is no system-Wine fallback. On NixOS,
-  Proton needs an FHS environment: romm-shelf prepends `steam-run` when it is on
-  `PATH` and Steam hasn't already supplied a runtime
-  (`STEAM_RUNTIME`/`PRESSURE_VESSEL_RUNTIME`). `ROMM_SHELF_PROTON_RUNNER` overrides
-  that prefix. Without the wrapper Wine starts but never opens a window.
+  first, then the newest installed Proton or `compatibilitytools.d` tool, then
+  the `proton` pack (GE-Proton, for a machine with no Steam: the streaming
+  image); `ROMM_SHELF_PROTON` overrides it. There is no system-Wine fallback. On
+  NixOS, Proton needs an FHS environment: romm-shelf prepends `steam-run` when it
+  is on `PATH` and Steam hasn't already supplied a runtime
+  (`STEAM_RUNTIME`/`PRESSURE_VESSEL_RUNTIME`). Without either, Proton runs in a
+  Steam Linux Runtime, as Steam runs it: the one its `toolmanifest.vdf` names
+  (`require_tool_appid`; GE-Proton 11 needs runtime 4), from Steam's install or
+  the `steam-runtime` pack. `ROMM_SHELF_PROTON_RUNNER` overrides that prefix.
+  Without a wrapper Wine starts but never opens a window.
+- **Streaming:** the streaming image runs these games, and Linux ones, through a
+  broker launcher that calls `romm-shelf native run`, the same run with no sync;
+  the broker carries the saves (notes-deployment.md § Route 5).
 - **Saves:** Windows `files` entries in the manifest are mapped onto a per-game
   profile in the layout, not into the prefix:
 
   ```
   saves/win/<name>/profile/        -> <prefix>/drive_c/users/steamuser  (bwrap bind)
-  saves/win/<name>/base/           -> overlay upper layer for writes next to the exe
   saves/win/<name>/public/         -> <prefix>/drive_c/users/Public      (only if used)
   saves/win/<name>/programdata/    -> <prefix>/drive_c/ProgramData       (only if used)
   ```
 
+  The profile is bound for every Windows game, not only those whose manifest
+  names a profile save, so generated config and caches under the user folder
+  stay on this device. Writes next to the executable go to the per-device
+  overlay at `~/.local/share/romm-shelf/overlays/win/<name>/upper/` (older
+  versions used `saves/win/<name>/base/`; the first launch moves it across).
+
   `<winAppData>`, `<winLocalAppData>`, `<winLocalAppDataLow>` and
   `<winDocuments>` resolve under `profile/`; `<home>` is the profile and
-  `<osUserName>` is `steamuser`. The Proton compatdata folder itself is
-  disposable, under `~/.local/share/romm-shelf/proton/<name>/` (Wine's prefix in
-  its `pfx/`), so a save can be restored before Proton has ever created it. Save
-  slots come from the manifest templates, as on Linux, and the emulator id is
-  `proton`.
-- **No fallback:** only `files` entries tagged `save` sync. Writes next to the
-  executable that the manifest does not name stay on the device; there is no
-  "sync everything in the overlay" mode, because the overlay also holds caches,
-  logs and config that must not overwrite another device's saves.
+  `<osUserName>` is `steamuser`. The Proton compatdata folder is under
+  `~/.local/share/romm-shelf/proton/<name>/` (Wine's prefix in its `pfx/`), so a
+  save can be restored before Proton has ever created it. If a prefix already
+  holds generated data, its user folder is copied into the profile once before
+  the bind hides it. Save slots come from the manifest templates, as on Linux,
+  and the emulator id is `proton`.
+- **No fallback:** only `files` entries tagged `save` sync. The overlay holds
+  every other write: config, caches and logs. They stay on the device and are
+  never uploaded, so they cannot overwrite another device's saves.
 - **Not synced:** registry-based saves (ludusavi's `registry:` section), and
   placeholders that only make sense in another store (`<storeUserId>` and
   friends). `<winDir>` paths are read from the prefix but not isolated in the

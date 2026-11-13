@@ -373,7 +373,9 @@ def _extract_one(member: tarfile.TarInfo, src: tarfile.TarFile, base: Path) -> N
         raise PackError(f"layer member has no data: {member.name}")
     with source, dest.open("wb") as out:
         shutil.copyfileobj(source, out)
-    os.chmod(dest, member.mode & 0o777)
+    # Owner-writable, as a Steam install is: the Steam Linux Runtime pack locks files/.ref by opening
+    # it read-write, and pressure-vessel's copy of the runtime keeps these modes and writes into it.
+    os.chmod(dest, (member.mode & 0o777) | 0o200)
 
 
 def extract_layer(data: bytes, root: Path | str | None, digest: str) -> tuple[str, ...]:
@@ -636,6 +638,19 @@ def installed_bundle(emulator, root: Path | str | None = None) -> tuple[Path, Pa
     if not bundle.is_dir():
         return None
     return bundle, root / "nix"
+
+
+def installed_component(name: str, root: Path | str | None = None) -> Path | None:
+    """An installed runtime pack's folder (`proton`, `steam-runtime`), or None.
+
+    Runtime packs copy their files rather than linking into the store, so the folder runs from
+    where it was extracted, without binding the pack's store at /nix."""
+    root = store_root(root)
+    entry = installed(root).get(name)
+    if not entry or not entry.get("emulators"):
+        return None
+    folder = root / entry["emulators"].lstrip("/") / name
+    return folder if folder.is_dir() else None
 
 
 def bwrap() -> Path:

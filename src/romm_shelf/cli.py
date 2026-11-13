@@ -458,6 +458,8 @@ def play(
             except Exception as e:
                 logger.warning("{} failed: {}", what, e)
 
+        # Move generated data to the per-device overlay before the sync reads the new paths.
+        native.prepare_moves(run)
         save_sync(True, "pulling saves")
         native.prepare(run)
         for patch in run.patches:  # the emulator's first setup: its default is copied, now patch it
@@ -748,7 +750,7 @@ def mod_pack(
     typer.echo(f"# packaged {mods.pack(p)}. Copy it into RomM's roms/{descriptor.absolute().parent.name}/ and rescan.")
 
 
-native_app = typer.Typer(no_args_is_help=True, help="Native games: folder ROMs that run themselves.")
+native_app = typer.Typer(no_args_is_help=True, help="Packaged games: Linux and Windows games that run themselves.")
 app.add_typer(native_app, name="native")
 
 
@@ -810,6 +812,63 @@ def native_pack(
     if rom is not None:
         typer.echo(f"# applied the manifest's metadata to ROM {rom.id}")
 
+
+
+def _packaged(archive: Path, platform: str | None) -> tuple[Path, str]:
+    archive = archive.expanduser().resolve()
+    platform = platform or archive.parent.name
+    if platform not in (proton.WINDOWS, proton.LINUX):
+        raise typer.BadParameter(f"platform must be {proton.WINDOWS} or {proton.LINUX}, not {platform!r}")
+    if not proton.is_game(archive):
+        raise typer.BadParameter(f"{archive} is not a packaged game (.squashfs)")
+    return archive, platform
+
+
+PlatformOption = Annotated[str | None, typer.Option(
+    help="RomM platform: win or linux. Default: the folder the archive is in")]
+
+
+@native_app.command("saves")
+def native_saves(archive: Path, platform: PlatformOption = None):
+    """Print the folders holding a packaged game's saves, one per line, from its manifest.
+
+    What the streaming image's broker launcher archives for each player (notes-deployment.md
+    § Route 5). Only `save` entries count, as for a sync.
+    """
+    archive, platform = _packaged(archive, platform)
+    layout = RetroDeckLayout.load(Settings())
+    try:
+        game = proton.squashfs_game(archive, platform)
+    except (proton.ManifestError, FileNotFoundError) as e:
+        raise typer.BadParameter(str(e))
+    for folder in proton.save_folders(game, archive, layout, platform):
+        typer.echo(folder)
+
+
+@native_app.command("run")
+def native_run(
+    archive: Path,
+    platform: PlatformOption = None,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would run; change nothing")] = False,
+):
+    """Run a packaged game from its archive, with no RomM lookup and no save sync.
+
+    What the streaming image's broker launcher runs: there the broker carries the saves
+    (notes-deployment.md § Route 5). Elsewhere, `play` is the command that syncs.
+    """
+    archive, platform = _packaged(archive, platform)
+    settings = Settings()
+    layout = RetroDeckLayout.load(settings)
+    try:
+        run = proton.run_plan(settings, layout, archive, platform=platform)
+    except (proton.ManifestError, FileNotFoundError) as e:
+        raise typer.BadParameter(str(e))
+    if plan:
+        for line in run.describe():
+            typer.echo(line)
+        return
+    native.prepare(run)
+    raise typer.Exit(native.launch(run))
 
 
 packs_app = typer.Typer(no_args_is_help=True,

@@ -84,7 +84,7 @@ Windows placeholders resolve into the game's save tree:
 
 | Placeholder | Resolves to |
 | --- | --- |
-| `<base>` | the writable overlay over the archive, `saves/win/<name>/base` |
+| `<base>` | the per-device writable overlay, `~/.local/share/romm-shelf/overlays/win/<name>/upper` |
 | `<home>`, `<osUserName>` | the per-game profile bound over Wine's user folder |
 | `<winAppData>` | `profile/AppData/Roaming` |
 | `<winLocalAppData>` | `profile/AppData/Local` |
@@ -99,14 +99,18 @@ Relative paths (`./`, `../`) are ignored, as the format requires. A glob's slot
 includes the matched path below the glob's base, so a fresh device can place a
 downloaded save.
 
-## There is no fallback
+## Generated data stays on the device
 
-romm-shelf does not sync everything the game writes to the overlay. **If a game
-writes a save somewhere the manifest does not declare, that file stays on the
-device and is never uploaded.** There is deliberately no "grab everything in the
-overlay" mode: the overlay also holds logs, caches, configs and re-downloadable
-data, and copying all of it would bloat RomM and could overwrite real saves on
-other devices. Add the path to `files` with `tags: [save]` and repack.
+Every packaged game, Windows or Linux, gets one persistent overlay at
+`~/.local/share/romm-shelf/overlays/<platform>/<name>/`. Writes next to the
+executable land there, and Windows' user folder is always bound to the per-game
+profile, so config, caches and any other generated file survive between launches
+on that device. A prefix that already holds generated data has its user folder
+copied into the profile once, before the bind hides it. The overlay is outside
+the save tree, so a sync never discovers it and `rm` never deletes it; it is not
+copied to RomM or to another device. Only manifest paths tagged `save` sync. **If a game writes a save somewhere the
+manifest does not declare, that file stays on the device and is never
+uploaded.** Add the path to `files` with `tags: [save]` and repack.
 
 ## 3. Check and pack
 
@@ -142,9 +146,10 @@ romm-shelf play <rom_id>
 ```
 
 `play` pulls that game's saves, runs it through Proton, then pushes the saves.
-On first launch Proton creates a disposable prefix under
-`~/.local/share/romm-shelf/proton/<name>/`; the saves and profile live under
-`saves/win/<name>/`, so a restore works before the prefix exists.
+On first launch Proton creates its prefix under
+`~/.local/share/romm-shelf/proton/<name>/`; the profile lives under
+`saves/win/<name>/` and is bound over Proton's user folder, so a restore works
+before the prefix exists and generated config/cache stay on the device.
 
 ## Troubleshooting
 

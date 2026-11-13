@@ -81,6 +81,7 @@ if (( PLAN )); then
   plan_note "  + rm -rf $CONTEXT; mkdir -p $CONTEXT/wheels"
   plan_note "  + cp $WHEEL $CONTEXT/wheels/"
   plan_note "  + cp $REPO_ROOT/packaging/docker/entrypoint.sh $CONTEXT/"
+  plan_note "  + cp -r $REPO_ROOT/packaging/docker/broker $CONTEXT/"
   printf '  + docker buildx build --platform linux/amd64 -f %q ' \
     "$REPO_ROOT/packaging/docker/Dockerfile"
   for tag in "${TAGS[@]}"; do
@@ -98,6 +99,7 @@ rm -rf "$CONTEXT"
 mkdir -p "$CONTEXT/wheels"
 cp -a --reflink=auto "$WHEEL" "$CONTEXT/wheels/"
 cp "$REPO_ROOT/packaging/docker/entrypoint.sh" "$CONTEXT/"
+cp -r "$REPO_ROOT/packaging/docker/broker" "$CONTEXT/"
 
 DOCKER_ARGS=(
   --platform linux/amd64

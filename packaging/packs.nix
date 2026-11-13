@@ -6,7 +6,8 @@
 { lib, dockerTools, emulatorsFor, version }:
 
 let
-  names = [ "retroarch" "dolphin" "pcsx2" "ppsspp" "rpcs3" "azahar" "cemu" "eden" ];
+  # The emulators, then the runtimes packaged games need where there's no Steam (the streaming image).
+  names = [ "retroarch" "dolphin" "pcsx2" "ppsspp" "rpcs3" "azahar" "cemu" "eden" "proton" "steam-runtime" ];
   mkPack = name:
     let
       bundle = emulatorsFor [ name ];

@@ -127,7 +127,13 @@ def _stub(rom_id: int) -> Rom:
 def backup(path: Path, root: Path, stamp: str) -> Path | None:
     if not path.exists():
         return None
-    dest = root / BACKUP_DIR / stamp / path.relative_to(root)
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        # A packaged game's generated data lives outside the layout, under XDG_DATA_HOME.
+        # Keep the full path below the backup folder so equally named files can't collide.
+        relative = Path("external", *path.parts[1:])
+    dest = root / BACKUP_DIR / stamp / relative
     dest.parent.mkdir(parents=True, exist_ok=True)
     if path.is_dir():
         shutil.copytree(path, dest, dirs_exist_ok=True)

@@ -56,3 +56,23 @@ def test_tool_env_drops_steams_overlay_preload(monkeypatch):
     env = config.tool_env()
     assert "LD_PRELOAD" not in env and "LD_LIBRARY_PATH" not in env
     assert env["HOME"] == "/home/deck"
+
+
+def _session(monkeypatch, stdout):
+    monkeypatch.setattr(config.shutil, "which", lambda name: "/bin/systemctl")
+    monkeypatch.setattr(config.subprocess, "run",
+                        lambda *a, **k: config.subprocess.CompletedProcess(a, 0, stdout, ""))
+
+
+def test_host_env_borrows_the_session_display_when_it_has_none(monkeypatch):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    _session(monkeypatch, "DISPLAY=:0\nWAYLAND_DISPLAY=wayland-0\nPATH=/x\n")
+    env = config.host_env()
+    assert env["DISPLAY"] == ":0" and env["WAYLAND_DISPLAY"] == "wayland-0"
+
+
+def test_host_env_keeps_its_own_display(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":1")
+    _session(monkeypatch, "DISPLAY=:0\n")
+    assert config.host_env()["DISPLAY"] == ":1"

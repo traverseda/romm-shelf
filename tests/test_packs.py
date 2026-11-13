@@ -438,3 +438,29 @@ def test_a_failed_update_does_not_prune_the_current_pack(tmp_path):
 
     assert (store / "nix/store" / STORE).is_dir()
     assert packs.installed(store)["retroarch"]["digest"] == first.ref.digest
+
+
+def test_extracted_files_are_owner_writable_like_a_steam_install(tmp_path):
+    """The Steam Linux Runtime pack locks files/.ref by opening it read-write, and pressure-vessel
+    writes into its copy of the runtime, which keeps these modes. The store's 0444 would stop both."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        info = tarfile.TarInfo(f"nix/store/{STORE}/steam-runtime/files/.ref")
+        info.mode = 0o444
+        tar.addfile(info, io.BytesIO(b""))
+        tool = tarfile.TarInfo(f"nix/store/{STORE}/steam-runtime/run")
+        tool.mode = 0o555
+        tool.size = 2
+        tar.addfile(tool, io.BytesIO(b"#!"))
+    packs.extract_layer(buffer.getvalue(), tmp_path, digest("runtime"))
+    base = tmp_path / "nix/store" / STORE / "steam-runtime"
+    assert (base / "files/.ref").stat().st_mode & 0o777 == 0o644
+    assert (base / "run").stat().st_mode & 0o777 == 0o755
+
+
+def test_installed_component_is_a_runtime_packs_folder(tmp_path, fake):
+    store = tmp_path / "packs"
+    packs.install(fake.ref, root=store, registry=fake.registry)
+    # The fake pack is named retroarch; a runtime pack's folder is named after the pack the same way.
+    assert packs.installed_component("retroarch", root=store) == store / "nix/store" / STORE / "retroarch"
+    assert packs.installed_component("proton", root=store) is None

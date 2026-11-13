@@ -337,9 +337,15 @@ class RunPlan:
     """Patches to apply once the seed files are written: an emulator's first setup."""
     mounts: tuple[Mount, ...] = ()
     """Filesystems to mount before the program and unmount after it."""
+    moves: tuple[tuple[Path, Path], ...] = ()
+    """One-time moves of generated data, performed before the directories are made."""
+    copies: tuple[tuple[Path, Path], ...] = ()
+    """One-time copies of generated data that has to stay where it is as well."""
 
     def describe(self) -> list[str]:
         lines = [f"write {p}" for p in [*self.files, *self.seed]]
+        lines += [f"copy {source} -> {target}" for source, target in self.copies]
+        lines += [f"move {source} -> {target}" for source, target in self.moves]
         lines += [f"make dir {p}" for p in self.dirs]
         lines += [f"link {p} -> {t}" for p, t in self.links.items()]
         lines += [m.describe() for m in self.mounts]
@@ -366,11 +372,41 @@ def _make_removable(path: Path) -> None:
             _make_removable(child)
 
 
+def prepare_moves(plan: RunPlan) -> None:
+    """Carry out one-time copies and moves before anything reads the new paths."""
+    for source, target in plan.copies:
+        if not source.exists() or (target.exists() and any(target.iterdir())):
+            continue
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, target, dirs_exist_ok=True, symlinks=True)
+    for source, target in plan.moves:
+        if not source.exists() or target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+
+
+def _clear_dead_mount(mount: Mount) -> None:
+    """Unmount a FUSE mount whose process is gone, as a killed run leaves it.
+
+    A dead FUSE mount fails every access with ENOTCONN, so nothing can mount over it until it is
+    unmounted. A live mount (the game already running) answers, and is left alone."""
+    try:
+        os.stat(mount.target)
+    except FileNotFoundError:
+        return
+    except OSError:
+        subprocess.run(list(mount.unmount), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       check=False, env=tool_env())
+
+
 def prepare(plan: RunPlan) -> None:
     """Write the seed and launch files. The caller applies plan.patches after this."""
+    prepare_moves(plan)
     for path in plan.dirs:
         path.mkdir(parents=True, exist_ok=True)
     for mount in plan.mounts:
+        _clear_dead_mount(mount)
         mount.target.mkdir(parents=True, exist_ok=True)
         if mount.workdir is not None:
             if mount.workdir.exists():

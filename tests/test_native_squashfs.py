@@ -8,11 +8,17 @@ from pathlib import Path
 
 import pytest
 
-from romm_shelf import proton
+from romm_shelf import native, proton
 from romm_shelf.adapters import DiscReader
 from romm_shelf.native import NativeAdapter
 from romm_shelf.library import LocalRom
 from tests.conftest import rom, touch
+
+
+@pytest.fixture(autouse=True)
+def isolated_data_home(tmp_path, monkeypatch):
+    """Generated-data overlays live under XDG_DATA_HOME; keep them out of the real home."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
 
 MANIFEST = """\
 Test Game:
@@ -71,7 +77,8 @@ def test_linux_placeholders_resolve_into_the_per_game_profile(monkeypatch, layou
     slots = proton.save_slots(game, path, layout, proton.LINUX)
     assert slots[proton.slot_name("<home>/.local/share/Test/save.dat")] == \
         saves / "profile/.local/share/Test/save.dat"
-    assert slots[proton.slot_name("<base>/next-to-exe.sav")] == saves / "base/next-to-exe.sav"
+    assert slots[proton.slot_name("<base>/next-to-exe.sav")] == \
+        proton.overlay_root("Test Game", proton.LINUX) / "next-to-exe.sav"
 
 
 def test_a_linux_save_restores_before_the_archive_has_run(monkeypatch, layout):
@@ -93,7 +100,7 @@ def test_linux_run_plan_overlays_the_archive_and_binds_the_profile(monkeypatch, 
     run = proton.run_plan(None, layout, path, platform=proton.LINUX)
     assert run.program == tools["bwrap"]
     assert "--overlay-src" in run.args and "--overlay" in run.args
-    assert str(proton.overlay_root(layout, "Test Game", proton.LINUX)) in run.args
+    assert str(proton.overlay_root("Test Game", proton.LINUX)) in run.args
     assert str(proton.profile_root(layout, "Test Game", proton.LINUX)) in run.args
     assert str(Path.home()) in run.args
     assert "steam-run" in run.args
@@ -227,5 +234,32 @@ def test_a_linux_game_dir_is_not_hidden_by_the_profile_home_bind(monkeypatch):
     # definitely outside $HOME; game_dir only computes the path and creates nothing.
     monkeypatch.setenv("XDG_RUNTIME_DIR", "/var/tmp/romm-shelf-pytest")
     assert not proton.game_dir("Test Game", proton.LINUX).is_relative_to(Path.home())
-    assert proton.game_dir("Test Game", proton.WINDOWS).is_relative_to(Path.home())
+    assert proton.game_dir("Test Game", proton.WINDOWS).is_relative_to(
+        proton.prefix_root("Test Game"))
 
+
+
+def test_a_dead_fuse_mount_is_unmounted_before_the_next_run(monkeypatch, tmp_path):
+    """A killed run leaves its squashfuse mount dead: every access fails with ENOTCONN."""
+    mount = native.Mount(tmp_path / "game.squashfs", tmp_path / "lower", ("squashfuse",),
+                         ("fusermount3", "-u", str(tmp_path / "lower")))
+    calls = []
+    monkeypatch.setattr(native.subprocess, "run", lambda cmd, **kwargs: calls.append(cmd))
+
+    real_stat = native.os.stat
+
+    def dead(path, *args, **kwargs):
+        if Path(path) == mount.target:
+            raise OSError(107, "Transport endpoint is not connected")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(native.os, "stat", dead)
+    native._clear_dead_mount(mount)
+    assert calls == [["fusermount3", "-u", str(tmp_path / "lower")]]
+
+    monkeypatch.setattr(native.os, "stat", real_stat)
+    calls.clear()
+    native._clear_dead_mount(mount)  # missing: nothing to unmount
+    (tmp_path / "lower").mkdir()
+    native._clear_dead_mount(mount)  # live: left alone
+    assert calls == []
