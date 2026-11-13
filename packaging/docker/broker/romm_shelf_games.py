@@ -51,6 +51,9 @@ ROMM_SHELF_DIR = CONFIG / "romm-shelf"
 PLATFORMS = ("win", "linux")
 """The RomM platforms a packaged game lives on."""
 
+GAME_WINDOW_CLASS = "romm-shelf-game"
+"""The X11 class an SDL game's window gets; the image's labwc rule opens it fullscreen."""
+
 SAVES_TIMEOUT = 120.0
 """Seconds `romm-shelf native saves` gets to read the manifest out of the archive."""
 
@@ -108,6 +111,10 @@ def romm_shelf_env() -> dict[str, str]:
     # ScummVM there too. SDL3 reads SDL_VIDEO_DRIVER, SDL2 SDL_VIDEODRIVER.
     env["SDL_VIDEO_DRIVER"] = "x11"
     env["SDL_VIDEODRIVER"] = "x11"
+    # The class the image's labwc rule fullscreens (Dockerfile): SDL3 reads SDL_APP_ID,
+    # SDL2 SDL_VIDEO_X11_WMCLASS.
+    env["SDL_APP_ID"] = GAME_WINDOW_CLASS
+    env["SDL_VIDEO_X11_WMCLASS"] = GAME_WINDOW_CLASS
     env["ROMM_SHELF_ROOT"] = str(ROMM_SHELF_DIR)
     env["XDG_DATA_HOME"] = str(ROMM_SHELF_DIR / "data")
     env["HOME"] = str(ROMM_SHELF_DIR / "home")
