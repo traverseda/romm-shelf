@@ -51,16 +51,6 @@ RUN set -eux; \
     rm /tmp/romm_shelf_games.py; \
     /lsiopy/bin/python3 -c 'from webstation_broker.emulators import get_emulator; assert get_emulator("romm-shelf") is not None'
 
-# Packaged games open fullscreen, as upstream's emulators do with their own flags.
-# The launcher gives SDL games the app id `romm-shelf-game`; labwc fullscreens that
-# window when it maps, so the game sees an ordinary resize and never takes SDL's
-# own fullscreen, which grabs the pointer the stream needs (upstream's scummvm.py).
-# /defaults/labwc.xml is the template init copies to rc.xml at every start.
-RUN set -eux; \
-    grep -q '<windowRules>' /defaults/labwc.xml; \
-    sed -i 's#<windowRules>#<windowRules>\n    <windowRule identifier="romm-shelf-game" serverDecoration="no"><action name="ToggleFullscreen" /></windowRule>#' /defaults/labwc.xml; \
-    grep -q 'identifier="romm-shelf-game"' /defaults/labwc.xml
-
 # The pack cache persists across container updates, like the rest of /config.
 # ROMM_SHELF_PACKS_AUTO is a comma-separated list; empty installs nothing.
 ENV ROMM_SHELF_PACKS=/config/romm-shelf/packs

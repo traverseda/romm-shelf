@@ -24,12 +24,16 @@ Shipped by the romm-shelf streaming image, which copies this module into
 `webstation_broker.emulators` and registers it in `REGISTRY` under `romm-shelf`.
 """
 
+import ctypes
+import ctypes.util
 import fnmatch
 import json
 import logging
 import os
 import re
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Optional, Union
@@ -52,7 +56,100 @@ PLATFORMS = ("win", "linux")
 """The RomM platforms a packaged game lives on."""
 
 GAME_WINDOW_CLASS = "romm-shelf-game"
-"""The X11 class an SDL game's window gets; the image's labwc rule opens it fullscreen."""
+"""The X11 class an SDL game's window gets, which the launcher opens fullscreen."""
+
+FULLSCREEN_POLL = float(os.environ.get("ROMM_SHELF_FULLSCREEN_POLL", "1"))
+"""Seconds between looks for a new game window to fullscreen."""
+
+
+class _ClientMessage(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong), ("send_event", ctypes.c_int),
+                ("display", ctypes.c_void_p), ("window", ctypes.c_ulong), ("message_type", ctypes.c_ulong),
+                ("format", ctypes.c_int), ("data", ctypes.c_long * 5)]
+
+
+class _XEvent(ctypes.Union):
+    _fields_ = [("xclient", _ClientMessage), ("pad", ctypes.c_long * 24)]
+
+
+class _ClassHint(ctypes.Structure):
+    _fields_ = [("res_name", ctypes.c_char_p), ("res_class", ctypes.c_char_p)]
+
+
+def _xlib() -> ctypes.CDLL:
+    """libX11, with the signatures `fullscreen_windows` calls."""
+    x = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+    window = ctypes.c_ulong
+    x.XOpenDisplay.restype, x.XOpenDisplay.argtypes = ctypes.c_void_p, [ctypes.c_char_p]
+    x.XDefaultRootWindow.restype, x.XDefaultRootWindow.argtypes = window, [ctypes.c_void_p]
+    x.XInternAtom.restype = ctypes.c_ulong
+    x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    x.XQueryTree.argtypes = [ctypes.c_void_p, window, ctypes.POINTER(window), ctypes.POINTER(window),
+                             ctypes.POINTER(ctypes.POINTER(window)), ctypes.POINTER(ctypes.c_uint)]
+    x.XGetClassHint.argtypes = [ctypes.c_void_p, window, ctypes.POINTER(_ClassHint)]
+    x.XSendEvent.argtypes = [ctypes.c_void_p, window, ctypes.c_int, ctypes.c_long, ctypes.POINTER(_XEvent)]
+    x.XFree.argtypes = [ctypes.c_void_p]
+    x.XFlush.argtypes = x.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    return x
+
+
+def fullscreen_windows(display: str, window_class: str, done: set[int]) -> list[int]:
+    """Ask the window manager to fullscreen each top-level window of `window_class` not in `done`.
+
+    Upstream's launchers boot every emulator fullscreen with the emulator's own flag;
+    packaged games have no common one. An EWMH `_NET_WM_STATE` request does what a
+    player's fullscreen key would: labwc fills the display and drops the title bar,
+    and the game sees an ordinary resize, never SDL's own fullscreen, which grabs the
+    pointer the stream drives (upstream's scummvm.py). labwc's window rules can't do
+    it: they match the instance half of WM_CLASS, which SDL3 takes from the program.
+
+    Args:
+        display: The X display, `:0`.
+        window_class: The class half of WM_CLASS to match.
+        done: Windows already asked; the new ones are added.
+
+    Returns:
+        The windows asked this time.
+    """
+    x = _xlib()
+    d = x.XOpenDisplay(display.encode())
+    if not d:
+        return []
+    asked = []
+    try:
+        root = x.XDefaultRootWindow(d)
+        r, p, n = ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_uint()
+        kids = ctypes.POINTER(ctypes.c_ulong)()
+        if not x.XQueryTree(d, root, ctypes.byref(r), ctypes.byref(p), ctypes.byref(kids), ctypes.byref(n)):
+            return []
+        windows = [kids[i] for i in range(n.value)]
+        if kids:
+            x.XFree(kids)
+        state = x.XInternAtom(d, b"_NET_WM_STATE", 0)
+        full = x.XInternAtom(d, b"_NET_WM_STATE_FULLSCREEN", 0)
+        for window in windows:
+            if window in done:
+                continue
+            hint = _ClassHint()
+            if not x.XGetClassHint(d, window, ctypes.byref(hint)):
+                continue
+            matched = hint.res_class == window_class.encode()
+            for field in (hint.res_name, hint.res_class):
+                if field is not None:
+                    x.XFree(ctypes.cast(field, ctypes.c_void_p))
+            if not matched:
+                continue
+            event = _XEvent()
+            msg = event.xclient
+            msg.type, msg.window, msg.message_type, msg.format = 33, window, state, 32  # ClientMessage
+            msg.data[0], msg.data[1], msg.data[3] = 1, full, 1  # _NET_WM_STATE_ADD, from an application
+            x.XSendEvent(d, root, 0, (1 << 19) | (1 << 20), ctypes.byref(event))  # SubstructureNotify|Redirect
+            done.add(window)
+            asked.append(window)
+        x.XFlush(d)
+    finally:
+        x.XCloseDisplay(d)
+    return asked
 
 SAVES_TIMEOUT = 120.0
 """Seconds `romm-shelf native saves` gets to read the manifest out of the archive."""
@@ -351,8 +448,31 @@ class RommShelf(Emulator):
         if rom_path is None or self.platform not in PLATFORMS:
             raise ValueError(f"romm-shelf: no packaged game to run ({rom_path})")
         cmd = [ROMM_SHELF_BIN, "native", "run", "--platform", self.platform, str(rom_path)]
+        env = romm_shelf_env()
         try:
-            self._spawn(cmd, romm_shelf_env())
+            self._spawn(cmd, env)
         except OSError:
             log.exception("romm-shelf: failed to launch %s", rom_path)
             raise
+        threading.Thread(target=self._keep_fullscreen, args=(env.get("DISPLAY", ":0"),),
+                         name="romm-shelf-fullscreen", daemon=True).start()
+
+    def _keep_fullscreen(self, display: str) -> None:
+        """Fullscreen each game window as it appears, for as long as the game runs.
+
+        A game can open more than one window over a session (OoT's shader preparation,
+        then the game), so this keeps looking rather than stopping at the first.
+
+        Args:
+            display: The X display the game's windows are on.
+        """
+        done: set[int] = set()
+        time.sleep(FULLSCREEN_POLL)
+        while self.alive():
+            try:
+                for window in fullscreen_windows(display, GAME_WINDOW_CLASS, done):
+                    log.info("romm-shelf: fullscreened game window %#x", window)
+            except OSError as exc:
+                log.warning("romm-shelf: can't fullscreen game windows: %s", exc)
+                return
+            time.sleep(FULLSCREEN_POLL)

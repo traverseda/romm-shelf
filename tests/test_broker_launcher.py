@@ -29,6 +29,9 @@ class Emulator:
     def stop(self):
         pass
 
+    def alive(self):
+        return False
+
     def _spawn(self, cmd, env):
         self.spawned = (cmd, env)
 
@@ -186,7 +189,7 @@ def test_launch_runs_romm_shelf_with_its_own_home(launcher):
     assert env["WAYLAND_DISPLAY"] == "wayland-0"
     # NVIDIA Vulkan can't present to the compositor's Wayland surfaces; Xwayland works.
     assert env["SDL_VIDEO_DRIVER"] == env["SDL_VIDEODRIVER"] == "x11"
-    # The class the image's labwc rule opens fullscreen.
+    # The class the launcher fullscreens (fullscreen_windows).
     assert env["SDL_APP_ID"] == env["SDL_VIDEO_X11_WMCLASS"] == "romm-shelf-game"
 
 
