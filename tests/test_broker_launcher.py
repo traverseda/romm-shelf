@@ -246,6 +246,32 @@ def test_a_pattern_keeps_its_fixed_folders(monkeypatch, launcher, tmp_path):
     assert place(emulator, "a [2026-01-02_03-04-05].dat") == f"{upper}/saves/slots/a.dat"
 
 
+def test_an_archive_from_before_the_save_folder_fix_still_restores(monkeypatch, launcher, tmp_path):
+    # 0.3.3 archived BotW's whole overlay upper (its shader cache too); refusing that
+    # archive's extra members failed the launch with a 422.
+    game = tmp_path / "roms/linux/Game.squashfs"
+    game.parent.mkdir(parents=True)
+    game.write_bytes(b"")
+    upper = UPPER.format("linux/Game")
+    saves_output(monkeypatch, launcher, answer(folders=(f"{upper}/save",), saves=[(f"{upper}/save", None)]))
+    emulator = launcher.RommShelf()
+    emulator.platform = "linux"
+    emulator.resolve_rom_file(game)
+    rel = upper.removeprefix("/config/")
+    assert emulator.save_subtrees == (f"{rel}/save",)
+    assert emulator.restore_subtrees == (f"{rel}/save", rel)
+
+
+def test_a_folder_rom_takes_its_platform_from_the_folder_above(monkeypatch, launcher, tmp_path):
+    saves_output(monkeypatch, launcher, answer())
+    game = tmp_path / "roms/linux/Game/Game.squashfs"
+    game.parent.mkdir(parents=True)
+    game.write_bytes(b"")
+    emulator = launcher.RommShelf()
+    assert emulator.resolve_rom_file(game.parent) == game
+    assert emulator.platform == "linux"
+
+
 def test_a_folder_zip_with_no_single_folder_slot_is_refused(monkeypatch, launcher, tmp_path):
     emulator, _ = game_with(monkeypatch, launcher, tmp_path, "win",
                             [("{}/a", None), ("{}/b", None)])

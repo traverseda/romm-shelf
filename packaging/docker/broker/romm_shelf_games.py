@@ -156,11 +156,34 @@ class RommShelf(Emulator):
     term_timeout = float(os.environ.get("ROMM_SHELF_STOP_WAIT", "20"))
     """Seconds SIGTERM gets before SIGKILL."""
 
+    @property
+    def restore_subtrees(self) -> tuple[str, ...]:
+        """Where an archive may restore: the save folders, and the folder a folder entry is in.
+
+        Before 0.3.4 a folder entry (`<base>/save`) archived its whole parent, so a
+        stream's archive from then also holds that parent's other files (the shader
+        cache). Restoring them is harmless and refusing them fails the launch; the
+        clear and the next archive keep to `save_subtrees`.
+
+        Returns:
+            `save_subtrees`, then each folder entry's parent not already listed.
+        """
+        legacy = []
+        for save in self.save_paths:
+            parent = save.path.parent.as_posix()
+            if save.base is None and not save.path.suffix and parent not in self.save_subtrees \
+                    and parent not in legacy and parent != ".":
+                legacy.append(parent)
+        return (*self.save_subtrees, *legacy)
+
     def _platform(self, rom: Path) -> Optional[str]:
-        """The game's platform: RomM's slug, else the folder the archive is in."""
+        """The game's platform: RomM's slug, else the platform folder the archive is in."""
         if self.platform in PLATFORMS:
             return self.platform
-        return rom.parent.name if rom.parent.name in PLATFORMS else None
+        for folder in (rom.parent.name, rom.parent.parent.name):
+            if folder in PLATFORMS:
+                return folder
+        return None
 
     def _read_saves(self, archive: Path, platform: str) -> tuple[tuple[str, ...], tuple[SavePath, ...]]:
         """The game's save folders and save paths, relative to `save_root`, from `romm-shelf native saves`.
