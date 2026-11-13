@@ -16,7 +16,9 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -399,6 +401,32 @@ def _mount(mount: Mount, timeout: float = 15, stderr=None) -> subprocess.Popen:
     raise RuntimeError(f"{mount.describe()} timed out")
 
 
+def _run_game(plan: RunPlan, output: TextIO | None) -> int:
+    """Run the program and wait for it, surviving Steam's stop signal.
+
+    Steam stops a game by signalling the whole process group. That used to kill `play` while it
+    waited, so the save push after the game never ran. Now a signal is forwarded to the game and
+    `play` carries on to push the saves."""
+    child = subprocess.Popen([str(plan.program), *plan.args], cwd=plan.cwd, env=host_env(plan.env),
+                             stdout=output, stderr=subprocess.STDOUT if output is not None else None)
+
+    def forward(signum, _frame) -> None:
+        try:
+            child.send_signal(signum)
+        except OSError:
+            pass
+
+    wanted = (signal.SIGINT, signal.SIGTERM)
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        previous = {sig: signal.signal(sig, forward) for sig in wanted}
+    try:
+        return child.wait()
+    finally:
+        for sig, handler in previous.items():  # the push that follows must not be interrupted either
+            signal.signal(sig, signal.SIG_IGN if handler in (signal.SIG_DFL, signal.default_int_handler) else handler)
+
+
 def launch(plan: RunPlan, output: TextIO | None = None) -> int:
     """Run the plan. `output` receives the program's stdout and stderr, which a Steam launch would
     otherwise discard; unset passes them through to this process."""
@@ -406,9 +434,7 @@ def launch(plan: RunPlan, output: TextIO | None = None) -> int:
     try:
         for mount in plan.mounts:
             mounted.append((mount, _mount(mount, stderr=output)))
-        return subprocess.run([str(plan.program), *plan.args], cwd=plan.cwd,
-                              env=host_env(plan.env), stdout=output,
-                              stderr=subprocess.STDOUT if output is not None else None).returncode
+        return _run_game(plan, output)
     finally:
         for mount, process in reversed(mounted):
             subprocess.run(list(mount.unmount), stdout=subprocess.DEVNULL,

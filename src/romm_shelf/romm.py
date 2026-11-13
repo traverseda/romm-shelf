@@ -132,7 +132,8 @@ class RommClient:
         self.http = httpx.Client(
             base_url=url.rstrip("/") + "/api",
             headers={"Authorization": f"Bearer {token}"},
-            timeout=30,
+            # A RomM that can't be reached must fail fast: `play` falls back to the local copy (design.md § Offline).
+            timeout=httpx.Timeout(30, connect=4),
             transport=transport,
         )
 
