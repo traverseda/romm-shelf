@@ -1,3 +1,3 @@
 """romm-shelf: a RomM client that works directly on a RetroDECK install."""
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
