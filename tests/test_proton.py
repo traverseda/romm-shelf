@@ -500,6 +500,26 @@ Test Game:
         (proton.profile_root(layout, "Test Game") / "AppData/Roaming/Test",)
 
 
+def test_a_folder_entry_is_its_own_save_folder(monkeypatch, layout):
+    """Breath of the Wild (Recomp)'s `<base>/save`: the archive must not take the overlay's cache."""
+    fake_manifest(monkeypatch, """
+Test Game:
+  romm-shelf:
+    program: Game/Game.exe
+  files:
+    "<base>/save":
+      tags: [save]
+    "<base>/profile/account.uid":
+      tags: [save]
+""")
+    path = archive(layout)
+    game = proton.squashfs_game(path)
+    [save, profile] = proton.save_folders(game, path, layout)
+    assert save.name == "save"
+    assert profile.name == "profile"
+    assert save.parent == profile.parent
+
+
 def test_native_saves_and_run_work_without_romm(monkeypatch, tmp_path):
     """The streaming image's launcher runs these: no RomM connection, no credentials, no sync."""
     from typer.testing import CliRunner

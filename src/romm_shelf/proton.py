@@ -402,7 +402,8 @@ def save_slots(game: ProtonGame, path: Path, layout: RetroDeckLayout,
 
 def save_folders(game: ProtonGame, path: Path, layout: RetroDeckLayout,
                  platform: str | None = None) -> tuple[Path, ...]:
-    """The folders holding this game's saves: each `save` entry's folder, or a glob's base.
+    """The folders holding this game's saves: a glob's base, a path that names a folder (no
+    extension, as a folder slot is), or the folder a file entry is in.
 
     What a streaming session archives (notes-deployment.md § Route 5), so only saves travel, as
     with a sync: never config or caches. A folder inside another listed one is left out."""
@@ -410,7 +411,12 @@ def save_folders(game: ProtonGame, path: Path, layout: RetroDeckLayout,
     folders: list[Path] = []
     for template in game.saves:
         resolved = expand_path(template, path, layout, platform)
-        folder = native.glob_base(resolved) if glob.has_magic(str(resolved)) else resolved.parent
+        if glob.has_magic(str(resolved)):
+            folder = native.glob_base(resolved)
+        else:
+            # `<base>/save` is the save folder itself; its parent would be the whole
+            # overlay, shader cache and all.
+            folder = resolved if not resolved.suffix else resolved.parent
         if folder not in folders:
             folders.append(folder)
     return tuple(f for f in folders if not any(f != o and f.is_relative_to(o) for o in folders))

@@ -85,17 +85,20 @@ streaming:
       # ...host, broker_host, subfolder, label as before...
       platforms:
         # ...existing entries...
-        win: romm-shelf
-        linux: romm-shelf
-```
-
-The block form works too, to set the play button's text:
-
-```yaml
         win:
           emulator: romm-shelf
-          label: Windows
+          clears_stale_saves: true
+        linux:
+          emulator: romm-shelf
+          clears_stale_saves: true
 ```
+
+`clears_stale_saves: true` turns on the save picker on the launch screen, which
+is how a save from a Deck or PC gets into a stream (see Saves). RomM only turns
+it on by itself for emulators it knows (`eden`, `retroarch`, …). Without it,
+RomM refuses a pick with "This emulator always restores the newest save". The
+launcher does empty the game's save folders at every launch, which is what the
+setting promises. `label: Windows` in a block sets the play button's text.
 
 ## 3. Apply
 
