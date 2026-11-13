@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import os
 
 import pytest
@@ -513,6 +514,16 @@ def test_native_saves_and_run_work_without_romm(monkeypatch, tmp_path):
     saves = CliRunner().invoke(app, ["native", "saves", str(game)])
     assert saves.exit_code == 0, saves.output
     assert saves.output.splitlines()[0] == str(profile / "AppData/Roaming/Test")
+    # --json adds each save path, which the launcher maps an app-uploaded save back with.
+    detail = CliRunner().invoke(app, ["native", "saves", "--json", str(game)])
+    assert detail.exit_code == 0, detail.output
+    listed = json.loads(detail.output)
+    assert listed["folders"][0] == str(profile / "AppData/Roaming/Test")
+    assert {"path": str(profile / "AppData/Roaming/Test/save.dat"), "glob": False,
+            "base": None} in listed["saves"]
+    [pattern] = [s for s in listed["saves"] if s["glob"]]
+    assert pattern["path"].endswith("/Test/saves/*.sav")
+    assert pattern["base"] == pattern["path"].removesuffix("/*.sav")
 
     monkeypatch.setattr(proton, "find_proton",
                         lambda: proton.Proton(touch(tmp_path / "p/proton"), tmp_path / "steam"))

@@ -1,5 +1,6 @@
 """Command line interface. Every UI action has a command here (design.md § Parity)."""
 
+import glob
 import json
 import os
 import sys
@@ -829,11 +830,14 @@ PlatformOption = Annotated[str | None, typer.Option(
 
 
 @native_app.command("saves")
-def native_saves(archive: Path, platform: PlatformOption = None):
+def native_saves(archive: Path, platform: PlatformOption = None,
+                 as_json: Annotated[bool, typer.Option("--json", help="Also list each save path.")] = False):
     """Print the folders holding a packaged game's saves, one per line, from its manifest.
 
     What the streaming image's broker launcher archives for each player (notes-deployment.md
-    § Route 5). Only `save` entries count, as for a sync.
+    § Route 5). Only `save` entries count, as for a sync. `--json` adds each manifest save
+    path resolved for this machine (`glob` and its `base` for a pattern), which the launcher
+    uses to put a save the app uploaded back where the game reads it.
     """
     archive, platform = _packaged(archive, platform)
     layout = RetroDeckLayout.load(Settings())
@@ -841,8 +845,18 @@ def native_saves(archive: Path, platform: PlatformOption = None):
         game = proton.squashfs_game(archive, platform)
     except (proton.ManifestError, FileNotFoundError) as e:
         raise typer.BadParameter(str(e))
-    for folder in proton.save_folders(game, archive, layout, platform):
-        typer.echo(folder)
+    folders = proton.save_folders(game, archive, layout, platform)
+    if not as_json:
+        for folder in folders:
+            typer.echo(folder)
+        return
+    paths = []
+    for template in game.saves:
+        resolved = proton.expand_path(template, archive, layout, platform)
+        is_glob = glob.has_magic(str(resolved))
+        paths.append({"path": str(resolved), "glob": is_glob,
+                      "base": str(native.glob_base(resolved)) if is_glob else None})
+    typer.echo(json.dumps({"folders": [str(f) for f in folders], "saves": paths}))
 
 
 @native_app.command("run")

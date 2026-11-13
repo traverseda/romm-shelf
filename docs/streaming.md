@@ -119,9 +119,29 @@ into them. At exit it archives them, and RomM keeps the archive as
 `<game> [romm-shelf <time>].saves.zip`. Only manifest paths tagged `save`
 travel; config and caches stay in the container.
 
-These archives don't mix with the per-slot saves the romm-shelf app syncs on a
-Deck or PC (`emulator` `proton` or `native`), so a game's progress doesn't yet
-follow you between a stream and a device. See todo.md.
+### Saves from a Deck or PC
+
+The romm-shelf app uploads one RomM save per manifest slot, under emulator
+`proton` (win) or `native` (linux): a slot's file as it is, a folder slot as
+`<folder>.zip`. On RomM's launch screen, pick one of them and the stream starts
+from it: the launcher accepts it as an import and puts it back where the
+manifest says the game reads it, as the app does on a download.
+
+- A file goes to the manifest path of the same name, or under the first
+  pattern (`**/*.sav`) that matches it, at the pattern's base. The app uploads
+  a matched file under its own name, so a folder between the base and the file
+  is lost: QBJ3's `autosave/start.sav` lands as `qbj3/start.sav`. Its numbered
+  saves (`s0.sav`, `s1.sav`) land where the game's load menu finds them.
+- A zipped folder unpacks into the game's one folder path (BotW's `save`, TotK's
+  `profile/save`). A game with more than one folder path refuses it.
+- RomM imports the one save you pick, so a game whose progress spans several
+  slots starts with just that slot.
+- A launch without a pick restores the newest stream archive
+  (`[romm-shelf …].saves.zip`), never a device save; that is RomM's rule for
+  every emulator but RetroArch.
+
+The other way round isn't done: the app doesn't read the stream's archives yet,
+so progress made in a stream stays in streams. See todo.md.
 
 ## Checking it
 
@@ -140,4 +160,6 @@ follow you between a stream and a device. See todo.md.
 | `fusermount3: mount failed: Operation not permitted` | `/dev/fuse` or `SYS_ADMIN` is missing; in an LXC, the `fuse` feature is off. |
 | Container won't start: `error gathering device information ... /dev/fuse` | The Docker host has no `/dev/fuse` (see the LXC section). |
 | `no Steam Proton found ... install the proton pack` | `ROMM_SHELF_PACKS_AUTO` doesn't name `proton`, or its download failed (see the container log at startup). |
+| `destination_unresolvable` when starting from a device save | No manifest path takes that file: check the game's `.ludusavi.yaml` against `romm-shelf native saves --json`. |
+| `PermissionError ... /config/romm-shelf` in the log | An image before 0.3.4 left the folder root-owned; 0.3.4's entrypoint hands it to `PUID:PGID` at start. |
 | `ImportError: cannot import name 'Self'` | Proton ran in the sniper runtime, which current Proton can't use; it needs runtime 4. Usually a `ROMM_SHELF_PROTON_RUNNER` override pointing at sniper: remove it. |
