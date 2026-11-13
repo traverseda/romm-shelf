@@ -290,6 +290,8 @@ runner disk.
 
 ### Packaged Linux and Windows games (2026-11-13)
 
+Setup for an existing RomM stack, including a Proxmox LXC: [docs/streaming.md](docs/streaming.md).
+
 Upstream maps every platform to one launcher class in the broker's `REGISTRY`.
 The image adds one more the same way: `packaging/docker/broker/romm_shelf_games.py`
 is copied into `webstation_broker.emulators` and registered as `romm-shelf`. It
