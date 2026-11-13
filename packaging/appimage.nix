@@ -74,7 +74,7 @@ stdenvNoCC.mkDerivation {
     # Static tools, copied out of the store: the AppImage must not need /nix on the host.
     mkdir -p AppDir/bin
     cp ${lib.getExe pkgsStatic.bubblewrap} AppDir/bin/bwrap
-    cp ${lib.getExe' pkgsStatic.squashfuse "squashfuse"} AppDir/bin/squashfuse
+    cp ${lib.getExe' pkgsStatic.squashfuse "squashfuse_ll"} AppDir/bin/squashfuse_ll
     cp ${lib.getExe' pkgsStatic.squashfsTools "unsquashfs"} AppDir/bin/unsquashfs
     cp ${lib.getExe' pkgsStatic.squashfsTools "mksquashfs"} AppDir/bin/mksquashfs
     cp ${lib.getExe' pkgsStatic.fuse3 "fusermount3"} AppDir/bin/fusermount3

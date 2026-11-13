@@ -3,7 +3,7 @@
 *Written 2026-11-07. These are notes, not a contract. [docs/design.md](docs/design.md)
 still governs behaviour; this file is about how romm-shelf reaches a machine.*
 
-romm-shelf is deployed six ways:
+romm-shelf is deployed five ways:
 
 | Route | Artifact | Emulators | Who it is for |
 |---|---|---|---|
@@ -12,7 +12,6 @@ romm-shelf is deployed six ways:
 | AppImage | self-updating AppImage | bundled | Steam Deck, plain Linux |
 | uv / PyPI | wheel + sdist | external or RetroDECK | a checkout, a Python user |
 | Docker | OCI image | GHCR packs | RomM's streaming webstation |
-| WSL2 | AppImage + packs | from GHCR packs | Windows, with WSLg's vGPU |
 
 The routes share one build rule: **GitHub Actions installs tools and calls build
 scripts; it does not contain build logic.** A script that works locally is the same
@@ -460,24 +459,6 @@ and save data are not in the image.
 
 `docker compose down`; the `/config` volume and the ROM library remain. Remove
 them by hand when no longer wanted.
-
-## Route 6: WSL2 on Windows
-
-*Added 2026-11-08. Written but not yet run on a real WSL2 machine.*
-
-`packaging/wsl/install-wsl.bat` is the Windows entry point; it ensures WSL2 and
-Ubuntu 24.04, calls `packaging/wsl/install-wsl.sh` inside the distribution, then
-restarts WSL so systemd starts and runs the finish phase. The Linux script is
-plan-first (`--plan` changes nothing) and installs the AppImage plus the Mesa,
-FUSE, Vulkan and WSLg prerequisites. It reports `/dev/dxg`, `/dev/dri`,
-`glxinfo` and `vulkaninfo` instead of assuming GPU acceleration worked.
-
-WSLg gives OpenGL through Mesa's `d3d12` driver; Vulkan (Dozen) is not
-guaranteed, while the bundled emulators default to Vulkan. There is no Steam
-client, so Steam Input cannot be used, and gamepads are not passed through by
-default. The UI is served by `romm-shelf serve --ui` and opened in the Windows browser;
-`install-wsl.bat --ui` does both. Details and the owner decisions are in
-[docs/wsl.md](docs/wsl.md) and [todo.md](todo.md).
 
 ## Build architecture
 

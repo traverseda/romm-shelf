@@ -59,6 +59,29 @@ def test_multi_file_rom_unpacks_into_its_folder(layout):
     assert sorted(p.name for p in plan.target.iterdir()) == ["Mega Man Legends 2.bin", "Mega Man Legends 2.cue"]
 
 
+def _zip_modes(files: dict[str, int]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, mode in files.items():
+            info = zipfile.ZipInfo(name)
+            info.create_system = 3
+            info.external_attr = mode << 16
+            z.writestr(info, b"x")
+    return buf.getvalue()
+
+
+def test_unpacking_keeps_execute_bits_but_never_takes_away_read(layout):
+    # RomM 5.4.1 sent Ocarina of Time (Recomp) with mode 0o032 on its files.
+    r = rom(3008, "linux", "Game").model_copy(update={"has_multiple_files": True})
+    plan = shelf.install_plan(r, layout)
+    shelf.install(plan, FakeClient(_zip_modes({"Game.squashfs": 0o032, "run.sh": 0o755, "data": 0o000})))
+    for name in ("Game.squashfs", "run.sh", "data"):
+        mode = (plan.target / name).stat().st_mode
+        assert mode & 0o600 == 0o600, name
+    assert (plan.target / "run.sh").stat().st_mode & 0o100
+    assert (plan.target / "data").read_bytes() == b"x"
+
+
 def test_multi_file_zip_wrapped_in_game_folder(layout):
     r = rom(1047, "psx", "Mega Man Legends 2").model_copy(update={"has_multiple_files": True})
     plan = shelf.install_plan(r, layout)

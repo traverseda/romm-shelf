@@ -287,6 +287,33 @@ def test_upload_cancels_on_a_failure_it_cant_retry(tmp_path):
     assert log["cancelled"] == 1 and log["completed"] == 0
 
 
+@pytest.mark.parametrize("answer", [504, "timeout"])
+def test_upload_doesnt_cancel_while_romm_is_still_assembling(tmp_path, answer):
+    # RomM writes the file inside /complete; its nginx gives up after 300 s on big files.
+    from romm_shelf.romm import UploadAssembling
+    log = {"cancelled": 0}
+
+    def handler(request):
+        path = request.url.path.removeprefix("/api")
+        if path == "/roms/upload/start":
+            return httpx.Response(201, json={"upload_id": "u1"})
+        if path == "/roms/upload/u1":
+            return httpx.Response(200, json={})
+        if path == "/roms/upload/u1/complete":
+            if answer == "timeout":
+                raise httpx.ReadTimeout("slow")
+            return httpx.Response(answer)
+        if path == "/roms/upload/u1/cancel":
+            log["cancelled"] += 1
+            return httpx.Response(204)
+        return httpx.Response(404)
+
+    client = RommClient("http://romm", "t", transport=httpx.MockTransport(handler))
+    with pytest.raises(UploadAssembling):
+        client.upload_rom(50, touch(tmp_path / "g.zip", b"x" * 100), "g.zip", chunk_size=64)
+    assert log["cancelled"] == 0
+
+
 def test_ensure_platform_creates_it_only_when_missing():
     client, log = _server()
     assert client.ensure_platform("linux") == 50

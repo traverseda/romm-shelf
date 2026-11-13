@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from romm_shelf import native, proton
+from romm_shelf import native, player, proton
 from romm_shelf.adapters import DiscReader
 from romm_shelf.library import LocalRom, match
 from tests.conftest import rom, touch
@@ -137,6 +137,47 @@ def test_a_squashfs_matches_its_folder_rom_by_name(monkeypatch, layout):
     assert m.matched == [(LocalRom("win", layout.roms / "win/Test Game.squashfs"), r)]
 
 
+def folder_rom(layout, platform="win", name="Test Game") -> Path:
+    """What RomM makes of a squashfs ROM once a screenshot is added to it."""
+    folder = layout.roms / platform / name
+    touch(folder / f"{name}.squashfs", b"not really squashfs")
+    touch(folder / "screenshots/key-art.jpg", b"jpg")
+    return folder
+
+
+def test_a_folder_rom_holding_one_squashfs_is_the_same_game(layout):
+    folder = folder_rom(layout)
+    assert proton.is_game(folder) and proton.archive_of(folder) == folder / "Test Game.squashfs"
+    other = layout.roms / "win/Other"
+    touch(other / "a.squashfs")
+    assert not proton.is_game(other)  # not named after its folder: not RomM's conversion
+    assert not proton.is_game(layout.roms / "win")  # the platform folder isn't a game
+    unpacked = layout.roms / "win/Unpacked"
+    touch(unpacked / "Unpacked.squashfs"), touch(unpacked / native.MANIFEST, b"x: {}")
+    assert not proton.is_game(unpacked)  # an unpacked native folder game, not an archive
+    assert not proton.is_game(touch(layout.roms / "win/Empty/readme.txt").parent)
+
+
+def test_a_windows_folder_rom_pairs_its_saves_and_runs_its_archive(monkeypatch, layout, tmp_path):
+    fake_manifest(monkeypatch)
+    folder = folder_rom(layout)
+    save = touch(proton.overlay_root("Test Game") / "next-to-exe.sav", b"save")
+    r = rom(9, "win", folder.name)
+    paired, unmatched = proton.ProtonAdapter().discover([r], layout, DiscReader(None, {}))
+    assert [(item, s.path) for item, s in paired] == [(r, save)] and not unmatched
+    slot = proton.slot_name("<winDocuments>/Test/saves/*.sav", "progress.sav")
+    assert proton.ProtonAdapter().target_path(LocalRom("win", folder), layout, "save", "p", slot) == \
+        layout.saves / "win" / "Test Game/profile/Documents/Test/saves/progress.sav"
+
+    monkeypatch.setattr(proton, "find_proton",
+                        lambda: proton.Proton(touch(tmp_path / "steam/proton"), tmp_path / "steam"))
+    monkeypatch.setattr(proton, "tool", lambda name: touch(tmp_path / "bin" / name))
+    run = proton.run_plan(None, layout, folder)
+    assert run.mounts[0].source == folder / "Test Game.squashfs"
+    assert str(folder / "Test Game.squashfs") in run.mounts[0].command
+    assert player.launches_directly(LocalRom("win", folder))
+
+
 def test_proton_is_experimental_first_then_newest(monkeypatch, tmp_path):
     root = tmp_path / "steam"
     experimental = touch(root / "steamapps/common/Proton - Experimental/proton", b"#!/bin/sh\n")
@@ -162,11 +203,11 @@ def test_run_plan_overlays_the_archive_and_binds_the_profile(monkeypatch, layout
     path = archive(layout)
     proton_script = touch(tmp_path / "steam/steamapps/common/Proton - Experimental/proton")
     bwrap = touch(tmp_path / "bin/bwrap")
-    squashfuse = touch(tmp_path / "bin/squashfuse")
+    squashfuse = touch(tmp_path / "bin/squashfuse_ll")
     fusermount = touch(tmp_path / "bin/fusermount3")
     monkeypatch.setattr(proton, "find_proton",
                         lambda: proton.Proton(proton_script, tmp_path / "steam"))
-    tools = {"bwrap": bwrap, "squashfuse": squashfuse, "fusermount3": fusermount,
+    tools = {"bwrap": bwrap, "squashfuse_ll": squashfuse, "fusermount3": fusermount,
              "unsquashfs": tmp_path / "bin/unsquashfs", "mksquashfs": tmp_path / "bin/mksquashfs"}
     monkeypatch.setattr(proton, "tool", lambda name: tools[name])
 

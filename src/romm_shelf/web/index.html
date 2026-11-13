@@ -400,6 +400,22 @@
       </q-card-section>
       <q-card-section>
         <div class="text-subtitle2">Saves</div>
+        <!-- Save slots (`romm-shelf saves slots|use`): the slot in use is highlighted; pressing
+             another switches to it, New slot copies the saves here into a fresh one. -->
+        <div v-if="slotInfo" class="row items-center q-gutter-xs q-mb-sm">
+          <span class="text-grey-5 q-mr-xs">Save slot:</span>
+          <q-btn v-for="s in slotInfo.slots" :key="s.name" dense unelevated no-caps class="q-px-sm" data-nav
+                 :color="s.name === slotInfo.active ? 'positive' : 'grey-8'"
+                 :label="s.label + (s.name === slotInfo.active ? ' ✓' : '')"
+                 :title="s.updated ? `${s.files} file${s.files === 1 ? '' : 's'}, ${when(s.updated)}` : 'no saves on RomM yet'"
+                 :loading="slotBusy === s.name" :disable="!!slotBusy || detail.status !== 'on-device'"
+                 @click="s.name !== slotInfo.active && useSlot(s.name, false)"></q-btn>
+          <q-btn v-if="detail.status === 'on-device' && detail.local_files.length" dense flat no-caps label="+ New slot"
+                 data-nav :disable="!!slotBusy" :loading="slotBusy === slotInfo.next"
+                 @click="useSlot(slotInfo.next, true)"></q-btn>
+        </div>
+        <div v-if="slotInfo && slotInfo.active === null" class="text-warning q-mb-sm">
+          RomM doesn't say which slot this device is on, so this game's saves aren't syncing. Choose one.</div>
         <div v-if="syncLoading" class="text-grey-5"><q-spinner size="14px"></q-spinner> Checking against RomM…</div>
         <div v-else-if="syncState.error" class="text-warning">Couldn't check: {{ syncState.error }}</div>
         <template v-else-if="syncState.roms[detail.id]">
@@ -414,7 +430,7 @@
             <span class="col">{{ s.file }} <span class="text-grey-6">({{ s.reason }})</span></span>
           </div>
         </template>
-        <div v-else-if="syncState.checked && detail.status === 'on-device'" class="text-positive">In sync with RomM.</div>
+        <div v-else-if="syncState.checked && detail.status === 'on-device' && slotInfo?.active !== null" class="text-positive">In sync with RomM.</div>
         <div v-else-if="syncState.checked" class="text-grey-6">Nothing to sync until it's installed.</div>
         <div class="text-subtitle2 q-mt-md">On this device</div>
         <div v-if="detailLoading" class="text-grey-5"><q-spinner size="14px"></q-spinner> Reading saves…</div>
@@ -698,6 +714,24 @@ const app = createApp({
       syncBusy.value = body.id;
       watchJobs();
     }
+    // Save slots of the open game. A switch is an Activity job; the row reloads when it ends.
+    const slotInfo = ref(null), slotBusy = ref(null);
+    let slotJob = null;
+    async function loadSlots(id) {
+      try {
+        const res = await fetch(`/api/rom/${id}/slots`);
+        if (res.ok && detail.value?.id === id) slotInfo.value = await res.json();
+      } catch (e) { /* offline: no slot row */ }
+    }
+    async function useSlot(name, isNew) {
+      const id = detail.value.id;
+      slotBusy.value = name; message.value = null;
+      const res = await fetch(`/api/rom/${id}/slots?${new URLSearchParams({ name, new: isNew })}`, { method: "POST" });
+      const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+      if (!res.ok) { message.value = `Couldn't switch slot: ${body.detail}`; slotBusy.value = null; return; }
+      slotJob = { id: body.id, rom: id };
+      watchJobs();
+    }
     const syncBadge = (r) => {
       const s = syncState.value.roms[r.id];
       return s && ({ up: { color: "orange-8", label: "↑ saves" }, down: { color: "light-blue-8", label: "↓ saves" },
@@ -748,6 +782,14 @@ const app = createApp({
               : `${j.kind === "update" ? "AppImage update" : j.kind === "prune" ? "Clean up" : "Emulator pack"} failed: ${j.error || "see Activity"}`;
           }
           await loadUpdates();
+        }
+        const slotDone = slotJob && activity.value.find((j) => j.id === slotJob.id && j.status !== "running");
+        if (slotDone) {
+          const rom = slotJob.rom;
+          slotJob = null; slotBusy.value = null;
+          if (slotDone.status === "failed") message.value = `Slot switch failed: ${slotDone.error}`;
+          if (detail.value?.id === rom) { loadSlots(rom); open(detail.value, true); }
+          loadSyncStatus(true);
         }
         if (finished.some((j) => !["play", "update", "pack", "prune"].includes(j.kind))) await reload();
         // The background service's syncs are another process: its plan cache isn't ours to drop.
@@ -1201,13 +1243,17 @@ const app = createApp({
     window.addEventListener("nav-search-done", () => { focusGrid(); });
 
     // The game page opens at once with what the grid knows; saves and the summary fill in.
-    async function open(r) {
-      lastFocus = document.activeElement;
-      message.value = null; confirmRemove.value = false;
-      gameSettingsOpen.value = false; gamePatches.value = []; gamePatchesMessage.value = null;
-      detail.value = { ...r, summary: "", local_files: [], server_saves: 0, server_states: 0 };
-      detailLoading.value = true; detailOpen.value = true;
-      await nextTick(); setTimeout(() => focusFirst(), 50);
+    async function open(r, refresh = false) {
+      if (!refresh) {
+        lastFocus = document.activeElement;
+        message.value = null; confirmRemove.value = false;
+        gameSettingsOpen.value = false; gamePatches.value = []; gamePatchesMessage.value = null;
+        detail.value = { ...r, summary: "", local_files: [], server_saves: 0, server_states: 0 };
+        slotInfo.value = null; slotBusy.value = null;
+        detailLoading.value = true; detailOpen.value = true;
+        loadSlots(r.id);
+        await nextTick(); setTimeout(() => focusFirst(), 50);
+      }
       try {
         const res = await fetch(`/api/rom/${r.id}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1337,7 +1383,7 @@ const app = createApp({
     watchJobs();  // pick up downloads already running in the daemon
     return { lib, load, ALL, isLibrary, query, filter, FILTERS, searchBox, narrowed, tabCount, filterCount, filterNote,
              letterOf, onCardFocus, jumpLetter, sentinel, limit, PAGE, detailLoading,
-             syncState, syncLoading, syncBusy, syncIds, syncNow, syncBadge,
+             syncState, syncLoading, syncBusy, syncIds, syncNow, syncBadge, slotInfo, slotBusy, useSlot,
              platforms, platform, shown, loading, error, detail, detailOpen, open, restoreFocus, size, when,
              jobs, job, message, busy, confirmRemove, install, uninstall, pct,
              playJob, playNow,

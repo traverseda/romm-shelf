@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from romm_shelf import bios, emulators, media, mods, packs, patches, player, sleep, steam
+from romm_shelf import bios, emulators, media, mods, packs, patches, player, sleep, slots, steam
 from romm_shelf import update as updater
 from romm_shelf.adapters import DiscReader, load_adapters
 from romm_shelf.auth import Session, load_session
@@ -34,7 +34,7 @@ from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom, match, remember, scan_local
 from romm_shelf.romm import Rom
 from romm_shelf.sync import inventory
-from romm_shelf.service import SyncResult, rom_for_path, sync_roms
+from romm_shelf.service import SyncResult, resolve_slots, rom_for_path, switch_slot, sync_roms
 
 WEB = Path(__file__).parent / "web"
 
@@ -142,7 +142,9 @@ class Shelf:
                     result = sync_roms(self.session, self.client, self.layout, self.adapters, None,
                                        plan_only=True, remote=list(self.library().roms.values()))
                     self._sync_status = {"checked": started, "error": None, "roms": out_of_sync(result),
-                                         "unmatched": [str(s.path) for s in result.unmatched]}
+                                         "unmatched": [str(s.path) for s in result.unmatched],
+                                         "slot_unknown": {i: [slots.label(n) for n in names]
+                                                          for i, names in result.unresolved.items()}}
                 except Exception as e:  # offline, RomM down: say so; the next ask tries again
                     logger.warning("sync status: {}", e)
                     return {"checked": started, "error": str(e) or type(e).__name__, "roms": {}, "unmatched": []}
@@ -432,6 +434,56 @@ def create_app(settings: Settings | None = None, *, ui: bool = False, watch_slee
             "extras": [{"name": e.name, "kind": e.kind, "url": f"/api/rom/{rom_id}/extras/{e.name}"}
                        for e in media.extras(r)],
         }
+
+    # Save slots: `romm-shelf saves slots <rom>` (design.md § Save slots).
+    @app.get("/api/rom/{rom_id}/slots")
+    def rom_slots(rom_id: int):
+        if rom_id not in shelf.library().roms:
+            raise HTTPException(404)
+        active, by = resolve_slots(shelf.client, shelf.session.device_id, [rom_id], shelf.adapters)
+        found = slots.slots_of(by.get(rom_id, []))
+        current = active[rom_id]
+        names = sorted(set(found) | ({current} if current is not None else set()))
+        return {
+            "active": current,
+            "active_label": slots.label(current),
+            "slots": [{"name": n, "label": slots.label(n), "files": len(found[n].heads) if n in found else 0,
+                       "updated": found[n].newest.updated_at.timestamp() if n in found else None}
+                      for n in names],
+            "next": slots.next_name(list(found)),
+        }
+
+    # Switch slot: `romm-shelf saves use <rom> <slot> [--new]`. An Activity job; answers at once.
+    @app.post("/api/rom/{rom_id}/slots", status_code=202)
+    def use_slot(rom_id: int, name: str, new: bool = False):
+        lib = shelf.library()
+        rom = lib.roms.get(rom_id)
+        if rom is None:
+            raise HTTPException(404)
+        try:
+            target = slots.parse_name(name)
+        except slots.SlotError as e:
+            raise HTTPException(400, str(e))
+        if (process := shelf.playing.get(rom_id)) is not None and process.poll() is None:
+            raise HTTPException(409, "the game is running; close it first")
+        if job := shelf.running("slot", rom_id):
+            return job
+        title = rom.name or rom.fs_name_no_ext
+        job = shelf.start_job("slot", f"{title}: {'new ' if new else ''}slot {slots.label(target)}", rom_id=rom_id)
+
+        def work():
+            try:
+                switch_slot(shelf.session, shelf.client, shelf.layout, shelf.adapters, rom, target, new=new,
+                            remote=list(lib.roms.values()),
+                            progress=lambda line: job["log"].append({"step": line, "error": None}))
+                shelf.end_job(job)
+            except Exception as e:
+                logger.exception("slot switch of {} failed", rom_id)
+                shelf.end_job(job, str(e) or type(e).__name__)
+            finally:
+                shelf.forget_sync_status()
+        threading.Thread(target=work, daemon=True).start()
+        return job
 
     # A game's manual, screenshots and video, passed through from RomM as the UI asks (`romm-shelf extras`).
     @app.get("/api/rom/{rom_id}/extras/{name}")

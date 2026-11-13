@@ -141,8 +141,9 @@ def is_game(folder: Path) -> bool:
 
 
 def is_archive(path: Path) -> bool:
-    """Whether this installed ROM is a native game packed as one squashfs archive."""
-    return path.is_file() and path.name.lower().endswith(ARCHIVE_SUFFIX)
+    """Whether this installed ROM is a native game packed as a squashfs: one file, or a folder ROM's only one."""
+    from romm_shelf import proton
+    return proton.is_game(path)
 
 
 def _program(game: FolderGame, folder: Path) -> Path:
@@ -249,10 +250,10 @@ class NativeAdapter:
     def saves_for(self, rom: LocalRom, layout: RetroDeckLayout) -> list[LocalSave]:
         if rom.system != PLATFORM:
             return []
+        if is_archive(rom.path):  # first: a folder ROM may hold a squashfs
+            return self._archive_saves(rom.path, layout)
         if rom.path.is_dir():
             return folder_saves(rom.path)
-        if is_archive(rom.path):
-            return self._archive_saves(rom.path, layout)
         return []
 
     def target_path(self, rom: LocalRom, layout: RetroDeckLayout, kind: str, file_name: str,
@@ -283,10 +284,10 @@ class NativeAdapter:
         if not root.is_dir():
             return paired, unmatched
         for entry in sorted(root.iterdir()):
-            if entry.is_dir() and is_game(entry):
-                saves = folder_saves(entry)
-            elif is_archive(entry):
+            if is_archive(entry):
                 saves = self._archive_saves(entry, layout)
+            elif entry.is_dir() and is_game(entry):
+                saves = folder_saves(entry)
             else:
                 continue
             if (rom := by_name.get((PLATFORM, entry.name))) is not None:

@@ -1,7 +1,8 @@
 """Packaged native games: a squashfs ROM with a ludusavi manifest, mounted and run.
 
-A game is one single-file `.squashfs` on RomM's `win` (Windows) or `linux`
-(native) platform. Its `.ludusavi.yaml` is at the archive root: `files` entries
+A game is one `.squashfs` on RomM's `win` (Windows) or `linux` (native)
+platform: a single-file ROM, or a folder ROM holding only that archive at its top
+(what RomM makes of it once a screenshot is added). Its `.ludusavi.yaml` is at the archive root: `files` entries
 tagged save and marked with the platform's `when: os:` say where saves live, and
 the `romm-shelf` key says what to run. The archive is mounted read-only with
 squashfuse and given a writable layer with bubblewrap, so a game may write next
@@ -24,6 +25,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,7 +38,7 @@ from romm_shelf.config import tool_env
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom
 from romm_shelf.native import ManifestError, RunPlan
-from romm_shelf.romm import Rom, RommError
+from romm_shelf.romm import Rom, RommError, UploadAssembling
 
 MANIFEST = native.MANIFEST
 WINDOWS = "win"
@@ -70,6 +72,9 @@ class ProtonGame:
     """RomM fields to describe the game, from `romm-shelf.metadata`."""
     platform: str = WINDOWS
     """The RomM platform this archive belongs to: `win` or `linux`."""
+    cache: tuple[str, ...] = ()
+    """Folder paths of generated caches, from `romm-shelf.cache`. Packing leaves them out, so
+    the game writes them into its persistent overlay and reads them from plain disk, not FUSE."""
 
     @property
     def key(self) -> str:
@@ -112,9 +117,30 @@ def tool(name: str) -> Path:
     return Path(found)
 
 
+def archive_of(path: Path) -> Path | None:
+    """The squashfs an installed ROM runs from: the file itself, or a folder ROM's only one.
+
+    RomM turns a single-file ROM into a folder when a screenshot or other file is added to it
+    (`<name>/<name>.squashfs` beside `screenshots/`), so both shapes are the same game. Only an
+    archive named after its folder counts, so a platform folder holding one game isn't a game. A
+    folder with a native manifest at its top is an unpacked native game, not this.
+    """
+    if path.is_file():
+        return path if path.name.lower().endswith(SUFFIX) else None
+    if not path.is_dir() or (path / native.MANIFEST).is_file():
+        return None
+    found = [p for p in path.iterdir()
+             if p.is_file() and p.name.lower().endswith(SUFFIX) and p.name[:-len(SUFFIX)] == path.name]
+    return found[0] if len(found) == 1 else None
+
+
 def is_game(path: Path) -> bool:
-    """Whether this installed ROM is a packaged squashfs game."""
-    return path.is_file() and path.name.lower().endswith(SUFFIX)
+    """Whether this installed ROM is a packaged squashfs game, as one file or a folder ROM."""
+    return archive_of(path) is not None
+
+
+def _archive(path: Path) -> Path:
+    return archive_of(path) or path
 
 
 def _manifest_text(squashfs: Path) -> str:
@@ -193,6 +219,21 @@ def _metadata(entry: dict) -> tuple[tuple[str, str], ...]:
     return tuple(metadata.items())
 
 
+def _cache_paths(declared: dict) -> tuple[str, ...]:
+    cache = declared.get("cache") or ()
+    if isinstance(cache, str) or not isinstance(cache, (list, tuple)):
+        raise ManifestError(f"{MANIFEST}: romm-shelf.cache has to be a list of folder paths")
+    paths = []
+    for entry in cache:
+        if not isinstance(entry, str) or not entry.strip("/\\"):
+            raise ManifestError(f"{MANIFEST}: romm-shelf.cache entries have to be paths in the folder")
+        path = entry.replace("\\", "/").strip("/")
+        if ".." in path.split("/"):
+            raise ManifestError(f"{MANIFEST}: romm-shelf.cache entry {entry} has to stay inside the folder")
+        paths.append(path)
+    return tuple(paths)
+
+
 def _launch_args(entry: dict, platform: str = PLATFORM) -> tuple[str, ...]:
     launch = entry.get("launch") or {}
     if not isinstance(launch, dict):
@@ -205,6 +246,7 @@ def _launch_args(entry: dict, platform: str = PLATFORM) -> tuple[str, ...]:
 
 
 def squashfs_game(squashfs: Path, platform: str = PLATFORM) -> ProtonGame:
+    squashfs = _archive(squashfs)
     entry = native.manifest_entry(load_manifest(squashfs), squashfs.stem)
     declared = entry.get("romm-shelf") or {}
     if not isinstance(declared, dict):
@@ -427,6 +469,7 @@ def squashfs_saves(path: Path, layout: RetroDeckLayout, platform: str = PLATFORM
     """Saves that exist on disk for an installed squashfs game."""
     if not is_game(path):
         return []
+    path = _archive(path)
     try:
         game = squashfs_game(path, platform)
     except (ManifestError, OSError, subprocess.SubprocessError) as e:  # one bad archive must not stop a sync
@@ -441,6 +484,7 @@ def target_for_slot(path: Path, layout: RetroDeckLayout, slot: str | None,
     """Where a downloaded save for this slot goes, from the manifest inside the archive."""
     if not is_game(path) or not slot:
         return None
+    path = _archive(path)
     try:
         game = squashfs_game(path, platform)
     except (ManifestError, OSError, subprocess.SubprocessError):
@@ -669,6 +713,7 @@ def needs_programdata(game: ProtonGame) -> bool:
 def run_plan(settings, layout: RetroDeckLayout, path: Path,
              platform: str = PLATFORM) -> RunPlan:
     """Mount the squashfs read-only, overlay it, and run the manifest's program."""
+    path = _archive(path)
     game = squashfs_game(path, platform)
     program = program_path(game)
     workdir = (game.workdir or (program.rsplit("/", 1)[0] if "/" in program else "")).strip("/\\")
@@ -687,7 +732,10 @@ def run_plan(settings, layout: RetroDeckLayout, path: Path,
         # The archive is root-owned (mksquashfs -all-root). Present it as the running user,
         # or overlayfs copies root-owned directories into the upper layer and the game can't
         # write into them (a save or config write becomes "permission denied").
-        command=(str(tool("squashfuse")), "-f", "-o", f"uid={os.getuid()},gid={os.getgid()}",
+        # squashfuse_ll, not squashfuse: the high-level one forces FUSE single-threaded, and a
+        # game reading many small files at startup queues behind it (BotW's 43k shader files:
+        # 11.3 s against 6.2 s on the Deck, 2026-11-13).
+        command=(str(tool("squashfuse_ll")), "-f", "-o", f"uid={os.getuid()},gid={os.getgid()}",
                  str(path), str(lower)),
         unmount=(str(tool("fusermount3")), "-u", str(lower)),
         workdir=work,
@@ -773,26 +821,35 @@ class PackPlan:
     output: Path
     game: ProtonGame
     platform: str = PLATFORM
+    manifest: str | None = None
+    """Manifest text added at the archive root, for a folder that has none of its own: a Steam
+    install (`native steam`), which is packed where it is and never written to."""
 
     @property
     def size(self) -> int:
-        return sum(p.stat().st_size for p in self.folder.rglob("*") if p.is_file())
+        left_out = [self.folder / c for c in self.game.cache]
+        return sum(p.stat().st_size for p in self.folder.rglob("*")
+                   if p.is_file() and not any(p.is_relative_to(c) for c in left_out))
 
     def describe(self) -> str:
         title = dict(self.game.metadata).get("name")
         line = (f"pack {self.folder} -> {self.output} on {self.platform} "
                 f"({self.size / 2**20:.1f} MB before compression), program {self.game.program}")
+        if self.game.cache:
+            line += f"\n  leave out caches: {', '.join(self.game.cache)}"
         return f"{line}\n  metadata: {title}" if title else line
 
 
-def _validate_folder(folder: Path, platform: str = PLATFORM) -> ProtonGame:
+def _validate_folder(folder: Path, platform: str = PLATFORM, text: str | None = None) -> ProtonGame:
     if not folder.is_dir():
         raise ManifestError(f"{folder}: not a folder")
     manifest = folder / MANIFEST
-    if not manifest.is_file():
+    if text is not None and manifest.exists():
+        raise ManifestError(f"{folder}: already has a {MANIFEST}; pack it with `native pack`")
+    if text is None and not manifest.is_file():
         raise ManifestError(f"{folder}: no {MANIFEST}")
     try:
-        data = yaml.safe_load(manifest.read_text())
+        data = yaml.safe_load(manifest.read_text() if text is None else text)
     except (OSError, yaml.YAMLError) as e:
         raise ManifestError(f"{manifest}: {e}") from e
     if not isinstance(data, dict) or not data:
@@ -817,22 +874,28 @@ def _validate_folder(folder: Path, platform: str = PLATFORM) -> ProtonGame:
     args = tuple(str(a) for a in (declared.get("args") or ()))
     return ProtonGame(folder, pattern, args or _launch_args(entry, platform),
                       _save_entries(entry, platform), workdir, folder.name, _metadata(entry),
-                      platform)
+                      platform, _cache_paths(declared))
 
 
-def pack_plan(folder: Path, output: Path, platform: str = PLATFORM) -> PackPlan:
+def pack_plan(folder: Path, output: Path, platform: str = PLATFORM, existing: bool = False,
+              manifest: str | None = None) -> PackPlan:
+    """What packing `folder` into `output` means. With `existing`, `output` is an archive
+    already packed from that folder, and nothing is packed again. `manifest` is the
+    `.ludusavi.yaml` to add for a folder that has none."""
     if platform not in (WINDOWS, LINUX):
         raise ManifestError(f"{platform}: pack for {WINDOWS} or {LINUX}")
     folder = folder.expanduser().resolve()
-    game = _validate_folder(folder, platform)
+    game = _validate_folder(folder, platform, manifest)
     output = output.expanduser()
     if output.suffix.lower() != SUFFIX:
         raise ManifestError(f"{output}: the archive has to end in {SUFFIX}")
     if output.resolve().is_relative_to(folder):
         raise ManifestError(f"{output}: write the archive outside the folder being packed")
-    if output.exists():
-        raise FileExistsError(f"{output} already exists")
-    return PackPlan(folder, output, game, platform)
+    if existing and not output.is_file():
+        raise FileNotFoundError(f"{output} doesn't exist: pack it first, without --existing")
+    if not existing and output.exists():
+        raise FileExistsError(f"{output} already exists: --existing uses it as it is")
+    return PackPlan(folder, output, game, platform, manifest)
 
 
 def pack(plan: PackPlan) -> Path:
@@ -840,7 +903,16 @@ def pack(plan: PackPlan) -> Path:
     command = [str(tool("mksquashfs")), str(plan.folder), str(plan.output),
                "-noappend", "-comp", "zstd", "-Xcompression-level", "22", "-b", "1M",
                "-all-root", "-no-progress", "-quiet", "-mkfs-time", "0", "-all-time", "0"]
-    subprocess.run(command, check=True, env=tool_env())
+    with tempfile.TemporaryDirectory(prefix="romm-shelf-pack-") as scratch:
+        if plan.manifest is not None:
+            # A pseudo file: mksquashfs adds the manifest at the root without it ever being
+            # written into the folder (which is someone else's, such as Steam's install).
+            source = Path(scratch) / MANIFEST
+            source.write_text(plan.manifest)
+            command += ["-p", f"{MANIFEST} f 444 root root cat {shlex.quote(str(source))}"]
+        if plan.game.cache:  # -e takes every argument after it, so it goes last
+            command += ["-e", *plan.game.cache]
+        subprocess.run(command, check=True, env=tool_env())
     return plan.output
 
 
@@ -853,17 +925,53 @@ def upload(plan: PackPlan, client, platform: str | None = None, progress=None) -
     """
     platform = platform or plan.platform
     platform_id = client.ensure_platform(platform)
-    client.upload_rom(platform_id, plan.output, plan.output.name, progress)
-    task = client.scan_platform(platform)
     metadata = dict(plan.game.metadata)
+    try:
+        client.upload_rom(platform_id, plan.output, plan.output.name, progress)
+    except UploadAssembling:
+        # RomM keeps writing after the gateway gives up; wait until a scan finds the file.
+        rom = wait_for_assembly(client, platform, platform_id, plan.output)
+    else:
+        task = client.scan_platform(platform)
+        if not metadata:
+            return None
+        _scan(client, platform, task)
+        rom = _scanned(client, platform_id, plan.output)
+        if rom is None:
+            raise RommError(f"RomM scanned {plan.output.name} but has no such ROM on platform {platform}")
     if not metadata:
         return None
-    status = client.wait_for_task(task["task_id"])
-    if status.get("status") != "finished":
-        raise RommError(f"RomM's {platform} scan {status.get('status')}; not applying {plan.output.name}'s metadata")
-    rom = next((r for r in client.roms(platform_ids=[platform_id])
-                if r.fs_name == plan.output.name or r.fs_name_no_ext == plan.output.stem), None)
-    if rom is None:
-        raise RommError(f"RomM scanned {plan.output.name} but has no such ROM on platform {platform}")
     client.update_rom(rom.id, metadata)
     return rom
+
+
+ASSEMBLY_RATE = 5 * 2**20  # bytes/s; RomM manages about 15 MB/s on hekate, so this is generous
+ASSEMBLY_POLL = 60  # seconds between scans; RomM's own watcher rescans 5 minutes after a change
+
+
+def wait_for_assembly(client, platform: str, platform_id: int, output: Path,
+                      *, interval: float = ASSEMBLY_POLL, sleep=None, clock=None) -> Rom:
+    """Scan until RomM lists the uploaded file at its full size, or give up."""
+    sleep, clock = sleep or time.sleep, clock or time.monotonic
+    size = output.stat().st_size
+    deadline = clock() + max(600, size / ASSEMBLY_RATE)
+    while True:
+        _scan(client, platform, client.scan_platform(platform))
+        rom = _scanned(client, platform_id, output)
+        if rom is not None and rom.fs_size_bytes == size:
+            return rom
+        if clock() >= deadline:
+            raise RommError(f"RomM still hasn't finished writing {output.name}; check roms/{platform}/ on the "
+                            f"server for a hidden .assembling file, then rescan")
+        sleep(interval)
+
+
+def _scan(client, platform: str, task: dict) -> None:
+    status = client.wait_for_task(task["task_id"])
+    if status.get("status") != "finished":
+        raise RommError(f"RomM's {platform} scan {status.get('status')}")
+
+
+def _scanned(client, platform_id: int, output: Path) -> Rom | None:
+    return next((r for r in client.roms(platform_ids=[platform_id])
+                 if r.fs_name == output.name or r.fs_name_no_ext == output.stem), None)

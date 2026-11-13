@@ -17,7 +17,7 @@ from typing import Literal
 
 from loguru import logger
 
-from romm_shelf import archive
+from romm_shelf import archive, slots
 from romm_shelf.adapters import Adapter, LocalSave
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom
@@ -39,6 +39,8 @@ class Step:
     op: SyncOperation | None = None
     local: LocalSave | None = None
     server_state: ServerState | None = None
+    labels: tuple[str, ...] = ()
+    """Extra labels for a state it uploads: the save slot in use (design.md § Save slots)."""
 
     def describe(self) -> str:
         return f"{self.action:11} {self.rom.id:>6}  {self.path.name}  ({self.reason})"
@@ -72,7 +74,7 @@ def plan_saves(
             if hit:
                 path = hit[1].path
             elif local and adapter:
-                path = adapter.target_path(local, layout, "save", op.file_name, op.slot)
+                path = adapter.target_path(local, layout, "save", op.file_name, slots.key(op.slot))
             if path is None and adapter and restore:
                 path = restore(op, adapter)
             if path is None:
@@ -90,13 +92,18 @@ def plan_states(
     inv: LocalInventory, server: dict[int, list[ServerState]], device_id: str, *,
     missing: dict[int, LocalRom] | None = None, roms: dict[int, Rom] | None = None,
     adapters: dict[str, Adapter] | None = None, layout: RetroDeckLayout | None = None,
+    slot_of: dict[int, str] | None = None,
 ) -> list[Step]:
     """design.md § States: push our newer states; pull only when nothing is local; flag the rest.
 
     `missing` holds ROMs with no local state at all; for those the newest server
-    state of an emulator we have an adapter for is pulled.
+    state of an emulator we have an adapter for is pulled. `slot_of` is the save slot
+    each ROM is on; only states of that slot count (design.md § Save slots).
     """
     label = STATE_LABEL.format(device_id)
+    slot_of = slot_of or {}
+    server = {rid: [st for st in sts if slots.state_slot(st.labels) == slot_of.get(rid, slots.DEFAULT)]
+              for rid, sts in server.items()}
     steps = []
     for rom_id, local in (missing or {}).items():
         usable = [st for st in server.get(rom_id, []) if st.emulator in (adapters or {})]
@@ -111,7 +118,8 @@ def plan_states(
         mtime = datetime.fromtimestamp(s.path.stat().st_mtime, UTC)
         if not mine or mtime > mine[0].updated_at:
             steps.append(Step("push-state", rom, s.path, "local state is newer" if mine else "not on server",
-                              local=s, server_state=mine[0] if mine else None))
+                              local=s, server_state=mine[0] if mine else None,
+                              labels=tuple(slots.state_labels(slot_of.get(rom.id, slots.DEFAULT)))))
         others = [st for st in server.get(rom.id, []) if label not in st.labels
                   and st.file_name == s.path.name and st.updated_at > mtime]
         if others:
@@ -211,7 +219,7 @@ def _run_one(step: Step, client: RommClient, device_id: str, layout: RetroDeckLa
                 client.replace_state(step.server_state.id, step.path)
             else:
                 st = client.upload_state(step.rom.id, step.path, emulator=step.local.emulator)
-                client.set_state_labels(st.id, [*st.labels, STATE_LABEL.format(device_id)])
+                client.set_state_labels(st.id, [*st.labels, STATE_LABEL.format(device_id), *step.labels])
         case "pull-state":
             data = client.download_state(step.server_state.id)
             backup(step.path, _root_for(step.path, layout), stamp)

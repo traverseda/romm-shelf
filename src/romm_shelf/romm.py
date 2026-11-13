@@ -127,6 +127,16 @@ class RommError(RuntimeError):
     pass
 
 
+class UploadAssembling(RommError):
+    """RomM has every chunk and is still writing the file, but the request timed out.
+
+    RomM assembles a chunked upload inside the /complete request, at about 15 MB/s,
+    and its nginx gives up after 300 s, so any file over a few GB ends this way. The
+    session is already claimed by then: /cancel does nothing and the file still lands.
+    RomM has no status endpoint for it; the file shows up in a scan once it's in place.
+    """
+
+
 class RommClient:
     def __init__(self, url: str, token: str, *, transport: httpx.BaseTransport | None = None):
         self.http = httpx.Client(
@@ -224,13 +234,19 @@ class RommClient:
                                 raise
                     if progress:
                         progress(min((index + 1) * chunk_size, size), size)
-            self.http.post(f"/roms/upload/{upload_id}/complete", timeout=600).raise_for_status()
         except BaseException:
             try:
                 self.http.post(f"/roms/upload/{upload_id}/cancel")
             except httpx.HTTPError:
                 pass  # the failure that got us here is the one to report
             raise
+        try:
+            r = self.http.post(f"/roms/upload/{upload_id}/complete", timeout=600)
+        except httpx.ReadTimeout:
+            raise UploadAssembling(f"{file_name}: RomM is still assembling it") from None
+        if r.status_code in (502, 503, 504):
+            raise UploadAssembling(f"{file_name}: RomM is still assembling it ({r.status_code})")
+        r.raise_for_status()
 
     def roms(self, page_size: int = 500, parallel: int = 4, platform_ids: list[int] | None = None) -> Iterator[Rom]:
         """Every ROM, or only those of `platform_ids` (an empty list is none, not all)."""
@@ -356,6 +372,20 @@ class RommClient:
 
     def saves(self, rom_id: int) -> list[dict]:
         return self._get("/saves", rom_id=rom_id)
+
+    def save_rows(self, rom_ids: list[int], *, device_id: str, batch: int = 500) -> list[dict]:
+        """Every save of these ROMs, each with its per-device sync entries (`device_syncs`)."""
+        rows: list[dict] = []
+        for i in range(0, len(rom_ids), batch):
+            rows += self._get("/saves", rom_ids=rom_ids[i:i + batch], device_id=device_id)
+        return rows
+
+    def track_save(self, save_id: int, *, device_id: str) -> None:
+        self._post(f"/saves/{save_id}/track", {"device_id": device_id})
+
+    def untrack_save(self, save_id: int, *, device_id: str) -> None:
+        """RomM's per-device untrack; romm-shelf uses it to record which save slot is in use."""
+        self._post(f"/saves/{save_id}/untrack", {"device_id": device_id})
 
     def asset(self, path: str) -> httpx.Response:
         """A file under RomM's /assets (covers, screenshots), fetched with our credentials."""

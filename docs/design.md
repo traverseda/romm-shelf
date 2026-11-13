@@ -339,6 +339,53 @@ governing rule still holds:
 The rule is that sync never silently loses a state. A state that loses out is
 still on the server, or in the local backup folder.
 
+### Save slots
+
+*Owner, 2026-11-13: "romm-shelf should support choosing a save slot": named
+playthroughs, with the slot in use recorded through RomM's track/untrack.*
+
+A **save slot** is a named set of one game's saves on RomM (`default`, `kid`,
+`speedrun`). Each device is on one slot per game: its saves go up to that slot, and
+only that slot's saves come down.
+
+- **Naming.** Every save file already has a RomM slot, the adapter's stable key
+  (`battery`, `gci:<file>`, …). The default slot keeps those bare keys, so a game
+  that never uses slots syncs exactly as before. Slot `kid` sends `@kid/<key>`
+  (names are 1-32 of `a-z0-9-_`). States have no RomM slot; a state pushed under a
+  named slot carries the label `romm-shelf:slot:<name>`, and only states of the
+  slot in use are pushed over, pulled or flagged.
+- **Which slot a device is on lives on RomM** (§ Governing rule), as RomM's
+  per-device *untrack* on save rows. Read from RomM 5.4.1's source: untrack is per
+  save row, negotiate checks only each slot's newest row, and
+  `GET /api/saves?device_id=` invents a tracked-looking entry for rows a device
+  never synced. So only the untrack flag counts as a mark:
+  1. no slot of the game is marked: the device never switched, so it's on `default`;
+  2. otherwise the one slot with saves on RomM and no mark; or `default` if every
+     slot with saves is marked and `default` has none;
+  3. anything else is **unknown**. That game's saves are left out of the sync
+     (`sync` prints it, the UI says so) until a slot is chosen again. Nothing is
+     uploaded to a slot the device may not be on.
+  A sync re-marks a left slot's newest save when another device has added a newer
+  one, so RomM's per-slot retention can't prune the mark away.
+- **Other slots' saves are never downloaded.** Negotiate offers them, since this
+  device never synced them, and romm-shelf drops those operations.
+- **Switching** (`romm-shelf saves use <rom> <slot> [--new] [--plan]`, or the game
+  page's *Save slot* row) runs in this order:
+  1. Push the game's saves to the slot it's on. If that slot is unknown, upload
+     them as archival (slot-less) saves instead.
+  2. For an existing slot, back up the game's local saves and states to the backup
+     folder and remove them. For a **new** slot, copy them to it on RomM; they stay
+     in place.
+  3. Track the target's marked saves and untrack the newest save of every other slot.
+  4. Pull the target with `restore_unlisted`.
+  Stopped anywhere, the local files are already gone before the mark moves, so the
+  next `play` (which pulls with restore) brings down whichever slot RomM says. A new
+  slot is always a copy of the saves here. A fresh start is that copy plus starting
+  over in-game, or `default` when it has no saves yet.
+- `romm-shelf saves slots <rom>` lists the slots and marks the one in use. The UI
+  shows the same list as buttons and names a new slot `slot-2`, `slot-3`, … so no
+  keyboard is needed.
+
 ### Safety
 
 - Before any download overwrites a local save, the existing file is copied to
@@ -967,7 +1014,9 @@ project's own setup; romm-shelf starts from a finished folder.
   uploads that one file, waits for the scan and applies the manifest's
   `romm-shelf.metadata`, so the entry is named from the manifest rather than the
   file name. A folder ROM (the older layout) still installs and plays; new games
-  use squashfs. The archive contains the game, so it's for the user's own private
+  use squashfs. A folder ROM that only wraps the archive (after a screenshot was
+  added in RomM) plays as the archive; see Windows games, *Folder ROMs holding
+  the archive*. The archive contains the game, so it's for the user's own private
   server and is never made public.
 - **The manifest:** `.ludusavi.yaml` is ludusavi's secondary-manifest format
   (<https://github.com/mtkennerly/ludusavi-manifest>). Its `files` list says where
@@ -975,7 +1024,11 @@ project's own setup; romm-shelf starts from a finished folder.
   because config is per machine. Paths are templates. A small `romm-shelf` key in
   the same entry says what to run (`program`, and optionally `args` and
   `workdir`; ludusavi's `launch.arguments` is the fallback), and may carry
-  `metadata` (`name`, `summary`) for the game's RomM entry. Entries marked
+  `metadata` (`name`, `summary`) for the game's RomM entry. `cache` lists folder
+  paths of generated caches that `native pack` leaves out (owner, 2026-11-13:
+  caches stay out of FUSE). The game rebuilds them in its per-device overlay,
+  which is plain disk. Thousands of small files through `squashfuse` cost
+  seconds on every launch, because each launch is a fresh mount. Entries marked
   `when: os: linux` apply; other systems' entries are ignored, as Windows ignores
   Linux ones. A relative path (`./…`, `../…`) is ignored, as the format requires.
 - **No per-game code:** nothing about a particular game is in romm-shelf. The
@@ -1031,6 +1084,22 @@ project's own setup; romm-shelf starts from a finished folder.
   and the raw source data. It keeps the ROM's own file name. Do it before the
   Switch release is removed: the recomp is then the single source of truth.
   `native pack --upload` applies a manifest's `romm-shelf.metadata` automatically.
+- **From a Steam install** (added 2026-11-13, for archiving): `romm-shelf native
+  steam <appid|name> --squashfs OUT [--upload] [--plan]` packs a DRM-free native
+  Linux game that is already installed through Steam. Steam's own files say
+  what the game is and where it is (`libraryfolders.vdf`, `appmanifest_*.acf`).
+  The `.ludusavi.yaml` is generated from ludusavi's primary manifest entry with
+  the same Steam app id: its Linux launch option, or else the install's one
+  executable, gives `program`; its Linux `files` give the save paths, with
+  `<root>/<game>`, `<game>` and `<storeGameId>` pinned by the install and
+  unresolvable paths (Steam Cloud's `<storeUserId>` folder) listed as skipped.
+  The install is never written to: the manifest is added to the archive as an
+  `mksquashfs` pseudo file. The result is an ordinary `linux` archive; nothing
+  records that it came from Steam except the manifest's `steam.id`. The
+  downloaded primary manifest is cached in `$XDG_CACHE_HOME/romm-shelf/` and is
+  disposable, like the launch index. `--print-manifest` and `--manifest FILE`
+  let the owner correct a generated manifest before packing. See
+  [winapps.md](winapps.md#archiving-a-linux-game-installed-through-steam).
 - **On the Deck:** TotK and BotW (ROMs 3002, 3001) launch from Steam shortcuts
   and their saves sync (owner, 2026-11-13). Not proven yet: that binding the
   profile over `$HOME` doesn't break a game that needs shared host data.
@@ -1058,6 +1127,14 @@ restore). See [winapps.md](winapps.md) for the step-by-step recipe.*
 - **Install:** the file goes to `roms/win/<name>.squashfs`, exactly where RomM
   keeps it, so path matching is unchanged. `get`, `rm`, media and the Steam
   shortcut work as for any other single-file game.
+- **Folder ROMs holding the archive** (`win` and `linux` alike): adding a
+  screenshot through RomM's API turns the ROM into a folder,
+  `<name>/<name>.squashfs` beside `screenshots/`. A folder whose top level holds
+  a `.squashfs` named after the folder and no native `.ludusavi.yaml` is the
+  same packaged game: `play`, saves and `native saves` use that archive, and the game key is
+  still the archive's stem. RomM marks such a folder `has_nested_single_file`
+  (seen on ROM 3008), so it sends the archive as is and install puts it inside
+  the folder, as for any such folder ROM.
 - **Launch:** `romm-shelf play` mounts the archive read-only with `squashfuse` and
   runs it through **Steam Proton**, inside bubblewrap. bwrap gives the game a
   writable overlay layer over the archive, so writes next to the executable don't

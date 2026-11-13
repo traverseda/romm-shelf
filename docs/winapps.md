@@ -61,6 +61,11 @@ Quake Brutalist Jam 3:
 - `args`: optional arguments for the executable.
 - `workdir`: optional directory under the archive root to run from. The default
   is the executable's directory.
+- `cache`: optional list of folder paths holding generated caches, such as a
+  shader cache. `native pack` leaves them out of the archive. The game rebuilds
+  them in its persistent per-device overlay and reads them from plain disk from
+  then on. Reading many small files through the FUSE mount is slow every launch:
+  BotW's 43k Savage Wind shader files (`cache/spirv`, `cache/xlate`) took 11 s.
 - `metadata`: optional RomM fields describing the game. `name` is the title and
   `summary` is the description. romm-shelf validates this block and prints it in
   `native pack --plan`; the block travels in the archive. `native pack --upload`
@@ -151,12 +156,50 @@ On first launch Proton creates its prefix under
 `saves/win/<name>/` and is bound over Proton's user folder, so a restore works
 before the prefix exists and generated config/cache stay on the device.
 
+## Archiving a Linux game installed through Steam
+
+For a DRM-free native Linux game you already have installed through Steam,
+`native steam` does steps 1–3 for you. It reads the install where Steam put it
+and never writes to it:
+
+```sh
+romm-shelf native steam "Stardew Valley" --squashfs "out/Stardew Valley.squashfs" --plan
+romm-shelf native steam 413150 --squashfs "out/Stardew Valley.squashfs"
+romm-shelf native run "out/Stardew Valley.squashfs" --platform linux
+romm-shelf native steam 413150 --squashfs "out/Stardew Valley.squashfs" --existing --upload
+```
+
+The game is named by Steam app id or by name. romm-shelf finds it in Steam's
+libraries (`libraryfolders.vdf`, `appmanifest_<id>.acf`), then looks the app id
+up in ludusavi's primary manifest. It caches a copy in
+`~/.cache/romm-shelf/ludusavi-manifest.yaml` for a week, or uses ludusavi's own
+copy if that is newer. `--ludusavi-manifest FILE` reads a copy you supply. From
+ludusavi's entry it takes:
+
+- **What to run:** Steam's Linux launch option, with its arguments and working
+  folder. If ludusavi has none, it uses the install's only Linux executable, or
+  the only one at the top of the folder. Otherwise it stops and asks for
+  `--program`.
+- **Saves:** the entry's Linux paths, keeping their `save`/`config` tags.
+  `<root>/<game>` becomes `<base>`, and `<game>` and `<storeGameId>` become the
+  install folder and the app id. A path romm-shelf can't resolve is left out,
+  and the plan lists it as a `skip` line with the reason. That includes Steam
+  Cloud's own folder (`<storeUserId>`), which only Steam writes.
+
+The plan prints the whole `.ludusavi.yaml`. Packing adds it at the archive root.
+It also carries the game's `steam.id` and `installDir`, and the Steam name as
+`metadata.name`. Check the saves as in step 3. If the manifest needs fixing, run
+`--print-manifest > game.yaml`, edit the file, and pack with `--manifest
+game.yaml`. If ludusavi doesn't know the game, the manifest declares no saves.
+If the install ships `libsteam_api.so`, the plan warns you: make sure the game
+runs under `native run` without Steam before relying on the archive.
+
 ## Troubleshooting
 
 - **The game cannot write next to its executable.** The archive is root-owned;
   romm-shelf mounts it with ownership remapped to the running user so overlay
   copies are writable. If you see `permission denied` on a save or config write,
-  check that the mount uses `squashfuse -o uid=<uid>,gid=<gid>`.
+  check that the mount uses `squashfuse_ll -o uid=<uid>,gid=<gid>`.
 - **Proton does not start on NixOS.** romm-shelf adds `steam-run` when the
   wrapper is on `PATH`; `ROMM_SHELF_PROTON_RUNNER=steam-run` forces it if the
   environment hides it, and make sure 32-bit FreeType is visible

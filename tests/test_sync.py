@@ -60,6 +60,9 @@ def test_full_sync_batches_rom_ids(layout, remote, monkeypatch):
         def complete_session(self, session_id, **kw):
             self.completed.append(session_id)
 
+        def save_rows(self, rom_ids, *, device_id):
+            return []
+
     monkeypatch.setattr(service, "NEGOTIATE_BATCH", 1)
     client = Client()
     session = Session(url="http://romm", token="t", device_id="dev")

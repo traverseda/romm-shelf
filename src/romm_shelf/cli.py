@@ -20,7 +20,7 @@ from romm_shelf.config import Settings, play_log, program
 from romm_shelf.layout import RetroDeckLayout
 from romm_shelf.library import LocalRom, match, name_matches, recall, remember, scan_local
 from romm_shelf.romm import Rom
-from romm_shelf import bios, media, mods, native, packs, patches, player, proton, steam
+from romm_shelf import bios, media, mods, native, packs, patches, player, proton, slots, steam, steamapps
 from romm_shelf import update as updater
 from romm_shelf.service import rom_for_path, sync_roms
 from romm_shelf.sync import inventory, negotiate_payload
@@ -781,29 +781,36 @@ def native_pack(
     upload: Annotated[bool, typer.Option("--upload", help="Upload it to RomM as one single-file ROM")] = False,
     platform: Annotated[str, typer.Option(help="RomM platform to pack for: win or linux")] = proton.PLATFORM,
     plan: Annotated[bool, typer.Option("--plan", help="Print what would be packed and uploaded; change nothing")] = False,
+    existing: Annotated[bool, typer.Option(
+        "--existing", help="The archive at --squashfs is already packed from FOLDER: don't pack again")] = False,
 ):
     """Pack a built native game folder, with its .ludusavi.yaml, as a squashfs for RomM.
 
     Validates the manifest and program, then writes the archive. --platform linux packs a
     Linux game (run through steam-run or the Steam Linux Runtime); win is the default.
     --upload creates the platform when missing, uploads the one file and, once RomM has
-    scanned it, applies the manifest's metadata to the entry.
+    scanned it, applies the manifest's metadata to the entry. --existing --upload uploads
+    an archive packed earlier without packing it again.
     """
     try:
-        p = proton.pack_plan(folder, squashfs, platform)
-    except (proton.ManifestError, FileExistsError) as e:
+        p = proton.pack_plan(folder, squashfs, platform, existing=existing)
+    except (proton.ManifestError, FileExistsError, FileNotFoundError) as e:
         raise typer.BadParameter(str(e))
-    typer.echo(p.describe())
+    if existing:
+        typer.echo(f"use {p.output} as packed (from {p.folder}, program {p.game.program})")
+    else:
+        typer.echo(p.describe())
     if upload:
         typer.echo(f"upload {p.output.name} to RomM platform {platform} (one file)")
         if p.game.metadata:
             typer.echo(f"  apply {len(p.game.metadata)} metadata fields after RomM scans it")
     if plan:
         return
-    with typer.progressbar(length=1, label=p.output.name) as bar:
-        proton.pack(p)
-        bar.update(1)
-    typer.echo(f"# wrote {p.output}")
+    if not existing:
+        with typer.progressbar(length=1, label=p.output.name) as bar:
+            proton.pack(p)
+            bar.update(1)
+        typer.echo(f"# wrote {p.output}")
     if not upload:
         typer.echo(f"# copy it into RomM's roms/{platform}/ on the server and rescan")
         return
@@ -814,15 +821,92 @@ def native_pack(
         typer.echo(f"# applied the manifest's metadata to ROM {rom.id}")
 
 
+@native_app.command("steam")
+def native_steam(
+    game: Annotated[str, typer.Argument(help="The installed Steam game: its app id or name")],
+    squashfs: Annotated[Path | None, typer.Option("--squashfs", help="Write the archive here")] = None,
+    program: Annotated[str | None, typer.Option(
+        help="What to run, relative to the install, when it can't be worked out")] = None,
+    manifest: Annotated[Path | None, typer.Option(
+        "--manifest", help="Use this .ludusavi.yaml instead of writing one (an edited --print-manifest)")] = None,
+    ludusavi_manifest: Annotated[Path | None, typer.Option(
+        "--ludusavi-manifest", help="ludusavi's primary manifest to read, instead of a cached download")] = None,
+    print_manifest: Annotated[bool, typer.Option(
+        "--print-manifest", help="Print only the .ludusavi.yaml that would be packed")] = False,
+    upload: Annotated[bool, typer.Option("--upload", help="Upload it to RomM as one single-file ROM")] = False,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would be packed and uploaded; change nothing")] = False,
+    existing: Annotated[bool, typer.Option(
+        "--existing", help="The archive at --squashfs is already packed: don't pack again")] = False,
+):
+    """Archive a DRM-free native Linux game installed through Steam, as `native pack` would.
+
+    Finds the install in Steam's libraries and writes its .ludusavi.yaml: what to run from
+    Steam's Linux launch option (or the install's one executable), and where it saves from
+    ludusavi's primary manifest, matched by Steam app id. The install is never written to;
+    the manifest is added to the archive as it is packed. Always on the linux platform.
+    """
+    try:
+        app = steamapps.find_app(game, steamapps.installed_apps())
+        if manifest is not None:
+            text, generated = manifest.expanduser().read_text(), None
+        else:
+            upstream = steamapps.ludusavi_manifest(ludusavi_manifest.expanduser() if ludusavi_manifest else None)
+            entry = steamapps.ludusavi_entry(upstream.text, app.appid, app.name)
+            generated = steamapps.generate(app, entry, program)
+            text = generated.text
+    except (steamapps.SteamGameError, OSError) as e:
+        raise typer.BadParameter(str(e))
+    if print_manifest:
+        typer.echo(text, nl=False)
+        return
+    if squashfs is None:
+        raise typer.BadParameter("--squashfs is required unless --print-manifest")
+    try:
+        p = proton.pack_plan(app.folder, squashfs, proton.LINUX, existing=existing, manifest=text)
+    except (proton.ManifestError, FileExistsError, FileNotFoundError) as e:
+        raise typer.BadParameter(str(e))
+    if generated is not None:
+        note = f" ({upstream.note})" if upstream.note else ""
+        typer.echo(f"# ludusavi manifest: {upstream.path}{note}")
+        for line in generated.describe():
+            typer.echo(line)
+    else:
+        typer.echo(f"steam app {app.appid} {app.name!r} at {app.folder}\n  manifest: {manifest}")
+    typer.echo(f"use {p.output} as packed" if existing else p.describe())
+    typer.echo(f"  add {proton.MANIFEST} at the archive root (the install is not changed):")
+    for line in text.splitlines():
+        typer.echo(f"    {line}")
+    if upload:
+        typer.echo(f"upload {p.output.name} to RomM platform {proton.LINUX} (one file)")
+        if p.game.metadata:
+            typer.echo(f"  apply {len(p.game.metadata)} metadata fields after RomM scans it")
+    if plan:
+        return
+    if not existing:
+        with typer.progressbar(length=1, label=p.output.name) as bar:
+            proton.pack(p)
+            bar.update(1)
+        typer.echo(f"# wrote {p.output}")
+    if not upload:
+        typer.echo(f"# try it with `romm-shelf native run {p.output} --platform linux`, then upload "
+                   f"with --existing --upload or copy it into RomM's roms/{proton.LINUX}/ and rescan")
+        return
+    _, _, client, _ = _context()
+    rom = proton.upload(p, client, proton.LINUX)
+    typer.echo(f"# uploaded {p.output.name}; RomM scanned it into its library")
+    if rom is not None:
+        typer.echo(f"# applied the manifest's metadata to ROM {rom.id}")
+
 
 def _packaged(archive: Path, platform: str | None) -> tuple[Path, str]:
     archive = archive.expanduser().resolve()
-    platform = platform or archive.parent.name
+    platform = platform or archive.parent.name  # a folder ROM's platform is still its parent
     if platform not in (proton.WINDOWS, proton.LINUX):
         raise typer.BadParameter(f"platform must be {proton.WINDOWS} or {proton.LINUX}, not {platform!r}")
-    if not proton.is_game(archive):
-        raise typer.BadParameter(f"{archive} is not a packaged game (.squashfs)")
-    return archive, platform
+    found = proton.archive_of(archive)
+    if found is None:
+        raise typer.BadParameter(f"{archive} is not a packaged game (.squashfs, or a folder holding one)")
+    return found, platform
 
 
 PlatformOption = Annotated[str | None, typer.Option(
@@ -1319,6 +1403,71 @@ def patches_apply(
         raise typer.Exit(str(e))
 
 
+saves_app = typer.Typer(no_args_is_help=True,
+                        help="Save slots: named sets of a game's saves on RomM, one in use per device.")
+app.add_typer(saves_app, name="saves")
+
+
+def _rom(client, rom_id: int) -> Rom:
+    import httpx
+    try:
+        return Rom.model_validate(client.rom_details(rom_id))
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise typer.BadParameter(f"no ROM {rom_id} in RomM")
+        raise
+
+
+@saves_app.command("slots")
+def saves_slots(rom_id: int):
+    """A game's save slots on RomM, and which one this device is on (design.md § Save slots)."""
+    from romm_shelf.service import resolve_slots
+
+    settings, session, client, layout = _context()
+    _rom(client, rom_id)
+    active, by = resolve_slots(client, session.device_id, [rom_id], load_adapters())
+    found = slots.slots_of(by.get(rom_id, []))
+    current = active[rom_id]
+    for name in sorted(set(found) | ({current} if current is not None else set())):
+        slot = found.get(name)
+        detail = (f"{len(slot.heads)} file{'s' * (len(slot.heads) != 1)}, newest "
+                  f"{slot.newest.updated_at:%Y-%m-%d %H:%M}") if slot else "no saves on RomM yet"
+        typer.echo(f"{'*' if name == current else ' '} {slots.label(name):<20} {detail}")
+    if current is None:
+        typer.echo(f"# this device's slot is unknown, so its saves aren't syncing: "
+                   f"choose one with `romm-shelf saves use {rom_id} <slot>`")
+
+
+@saves_app.command("use")
+def saves_use(
+    rom_id: int,
+    slot: Annotated[str, typer.Argument(help="Slot name; `default` is the slot every game starts on")],
+    new: Annotated[bool, typer.Option("--new", help="Make a new slot from the saves on this device")] = False,
+    plan: Annotated[bool, typer.Option("--plan", help="Print what would happen; change nothing")] = False,
+):
+    """Switch a game to another save slot: push its saves, move them aside, pull the slot's."""
+    from romm_shelf.service import SwitchFailed, switch_slot
+
+    settings, session, client, layout = _context()
+    rom = _rom(client, rom_id)
+    try:
+        result = switch_slot(session, client, layout, load_adapters(), rom, slots.parse_name(slot),
+                             new=new, plan_only=plan, progress=typer.echo)
+    except (slots.SlotError, SwitchFailed) as e:
+        raise typer.Exit(f"error: {e}")
+    if plan:
+        for line in result.plan.lines():
+            typer.echo(line)
+        return
+    for step in (result.pulled.steps if result.pulled else []):
+        typer.echo(step.describe())
+    failed = (result.pulled.failed if result.pulled else 0)
+    if failed:
+        typer.echo(f"# pulling slot {slots.label(result.plan.target)}: {failed} step(s) failed; "
+                   "the next sync or play tries again")
+        raise typer.Exit(1)
+
+
 @app.command()
 def hook(
     event: Annotated[str, typer.Argument(help="game-start or game-end")],
@@ -1370,6 +1519,9 @@ def sync(
         typer.echo(step.describe())
     for save in result.unmatched:
         typer.echo(f"# not on RomM, not synced: {save.path}")
+    for rom_id, names in result.unresolved.items():
+        typer.echo(f"# ROM {rom_id}: save slot unknown ({', '.join(map(slots.label, names)) or 'none on RomM'}), not synced; "
+                   f"choose one with `romm-shelf saves use {rom_id} <slot>`")
     counts = Counter(s.action for s in result.steps)
     typer.echo("# " + (", ".join(f"{k}: {v}" for k, v in sorted(counts.items())) or "nothing to do"))
     if not plan:

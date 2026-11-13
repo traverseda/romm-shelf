@@ -413,7 +413,7 @@ runCommand "romm-shelf-emulators${if components == null then "" else "-" + lib.c
   # doesn't depend on the host having them.
   mkdir -p $out/bin
   ln -s ${lib.getExe' bubblewrap "bwrap"} $out/bin/bwrap
-  ln -s ${lib.getExe' squashfuse "squashfuse"} $out/bin/squashfuse
+  ln -s ${lib.getExe' squashfuse "squashfuse_ll"} $out/bin/squashfuse_ll
   ln -s ${lib.getExe' squashfsTools "unsquashfs"} $out/bin/unsquashfs
   ln -s ${lib.getExe' squashfsTools "mksquashfs"} $out/bin/mksquashfs
   ln -s ${lib.getExe' fuse3 "fusermount3"} $out/bin/fusermount3

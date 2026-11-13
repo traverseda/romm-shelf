@@ -89,9 +89,14 @@ def unpack(part: Path, staging: Path, name: str) -> Path:
                 raise ValueError(f"unsafe path in download: {member}")
         z.extractall(staging)
         for info in z.infolist():  # extractall drops permissions, and a native game has to run
-            mode = (info.external_attr >> 16) & 0o777
-            if mode & 0o111 and not info.is_dir():
-                (staging / info.filename).chmod(mode)
+            # Only the execute bit is taken from the zip, added where the file is readable.
+            # RomM 5.4.1's zips carry junk mode bits (Ocarina of Time's came out 0o032,
+            # unreadable), so copying the mode itself can lock the owner out.
+            if info.is_dir() or info.create_system != 3 or not (info.external_attr >> 16) & 0o111:
+                continue
+            path = staging / info.filename
+            mode = path.stat().st_mode & 0o777
+            path.chmod(mode | (mode & 0o444) >> 2)
     # RomM may wrap the files in a folder named after the game; unwrap it.
     inner = list(staging.iterdir())
     return inner[0] if len(inner) == 1 and inner[0].is_dir() and inner[0].name == name else staging
