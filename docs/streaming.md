@@ -113,6 +113,45 @@ is slow: before the desktop comes up, it downloads the `proton` and
 `steam-runtime` packs into `/config/romm-shelf/packs`. Later starts only check for
 updates.
 
+## More than one player
+
+One webstation container runs one session at a time, so N players need N
+containers. Copy the webstation service once per extra player and change, in
+each copy:
+
+- the service name and `container_name` (`romm-webstation-2`, …)
+- `SUBFOLDER=/streaming2/` and the Traefik router's `PathPrefix(`/streaming2/`)`
+- the router and service names in the labels (`romm-stream2`), which Traefik
+  needs to be unique
+- the `/config` volume (`./data/webstation_config_2:/config`): each container
+  keeps its own packs, overlays and shader caches
+
+Then repeat the container entry in `config.yml` with its own `host`,
+`broker_host` and `subfolder`, and **the same `platforms` map**. RomM treats
+containers that serve a platform with the same settings as one pool, and a
+launch takes whichever one is free:
+
+```yaml
+streaming:
+  containers:
+    - protocol: webstation
+      host: /streaming
+      broker_host: http://romm-webstation:3000
+      subfolder: /streaming
+      label: Webstation
+      platforms: { ... }
+    - protocol: webstation
+      host: /streaming2
+      broker_host: http://romm-webstation-2:3000
+      subfolder: /streaming2
+      label: Webstation 2
+      platforms: { ... }   # the same map as above
+```
+
+All the containers share one GPU. A GeForce card limits how many NVENC
+encodes run at once (5 on driver 535), and VRAM runs out before that with
+heavy games. Every container's first start downloads the packs again.
+
 ## Saves
 
 The broker carries the saves, as it does for every streaming emulator. When a
@@ -145,6 +184,14 @@ manifest says the game reads it, as the app does on a download.
 
 The other way round isn't done: the app doesn't read the stream's archives yet,
 so progress made in a stream stays in streams. See todo.md.
+
+## Windows
+
+A Linux game's SDL window runs on Xwayland (NVIDIA's Vulkan can't present to
+the compositor's Wayland surfaces). The launcher fullscreens it through the
+window manager when it opens, as upstream's launchers do with each
+emulator's own fullscreen flag. A Windows game under Proton keeps its own
+window setting; set it to fullscreen in the game.
 
 ## Checking it
 
