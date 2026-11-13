@@ -102,6 +102,12 @@ def romm_shelf_env() -> dict[str, str]:
         `base_launch_env()` with romm-shelf's folders set.
     """
     env = base_launch_env()
+    # SDL picks Wayland when WAYLAND_DISPLAY is set, and NVIDIA's Vulkan can't present
+    # to this compositor's Wayland surfaces ("queue-family present support failed": a
+    # black window). Xwayland works, which is why upstream pins Dolphin, RPCS3 and
+    # ScummVM there too. SDL3 reads SDL_VIDEO_DRIVER, SDL2 SDL_VIDEODRIVER.
+    env["SDL_VIDEO_DRIVER"] = "x11"
+    env["SDL_VIDEODRIVER"] = "x11"
     env["ROMM_SHELF_ROOT"] = str(ROMM_SHELF_DIR)
     env["XDG_DATA_HOME"] = str(ROMM_SHELF_DIR / "data")
     env["HOME"] = str(ROMM_SHELF_DIR / "home")

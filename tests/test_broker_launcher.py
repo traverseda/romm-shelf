@@ -184,6 +184,8 @@ def test_launch_runs_romm_shelf_with_its_own_home(launcher):
     assert env["ROMM_SHELF_ROOT"] == "/config/romm-shelf"
     assert env["XDG_DATA_HOME"] == "/config/romm-shelf/data"
     assert env["WAYLAND_DISPLAY"] == "wayland-0"
+    # NVIDIA Vulkan can't present to the compositor's Wayland surfaces; Xwayland works.
+    assert env["SDL_VIDEO_DRIVER"] == env["SDL_VIDEODRIVER"] == "x11"
 
 
 UPPER = "/config/romm-shelf/data/romm-shelf/overlays/{}/upper"
